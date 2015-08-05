@@ -27,45 +27,20 @@
 * condititons and terms to use this software.
 ********************************************************************/
 
-/*! \file vn100_lib.h
- * 	\brief vn100_lib include file.
-*/
+#ifndef _DIRECTION_COSINE_MATRIX_H
+#define _DIRECTION_COSINE_MATRIX_H
 
-//! \ingroup devices
-//!	\defgroup vn100_lib Vectornav VN-100 Inertial Measurement Unit device library.
-//! VN-100 Device Library.
-//!
-//! Device level support for the VN-100, connected through a serial interface. The unit is expected to be in
-//! "command mode" and not sending data continuously. To achieve this, the Asynchronous Data Output Type Register
-//! (system register 6), should be set to 0 (VNWRG,6,0).
+#include "mathTypes.h"
 
-#ifndef _VN100LIB_H
-#define _VN100LIB_H
 
-#include "configCosmos.h"
-#include "cssl_lib.h"
-#include "jsonlib.h"
-#include "timelib.h"
+class DCM {
+private:
 
-#define VN100_BAUD 115200
-#define VN100_BITS 8
-#define VN100_PARITY 0
-#define VN100_STOPBITS 1
+public:
+    cmatrix base2_from_base1(basisOrthonormal base2,basisOrthonormal base1);
+    cmatrix base1_from_base2(basisOrthonormal base1, basisOrthonormal base2);
 
-typedef struct
-{
-	cssl_t *serial;
-	imustruc imu;
-	char buf[150];
-} vn100_handle;
-
-int32_t vn100_connect(string dev, vn100_handle *handle);
-int32_t vn100_disconnect(vn100_handle *handle);
-int32_t vn100_measurements(vn100_handle *handle);
-int32_t vn100_voltages(vn100_handle *handle);
-int32_t vn100_asynchoff(vn100_handle *handle);
-int32_t vn100_magcal_off(vn100_handle *handle);
-int32_t vn100_magcal_on(vn100_handle *handle);
-int32_t vn100_magcal_get(vn100_handle *handle);
-int32_t vn100_get_mag(vn100_handle *handle, double error, double delay);
+    double dotProduct(cvector a, cvector b);
+    cmatrix transposeMatrix(cmatrix a);
+};
 #endif
