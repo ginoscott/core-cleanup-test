@@ -27,34 +27,31 @@
 * condititons and terms to use this software.
 ********************************************************************/
 
-// just for the old code for timeval, deprecated
-//#if defined(_MSC_VER) && (_MSC_VER >= 1020)
-//#include <winsock.h>
-//#endif
-
-#ifndef TIME_UTILS
-#define TIME_UTILS
-
 #include "support/configCosmos.h"
-#include <iostream>
-#include <string>
 
-#ifndef CROSS_TYPE_arm
-#include <chrono>
-#include <ctime>
+#include "agent/agentclass.h"
+#include "support/jsonlib.h"
+#include "support/convertlib.h"
+#include "support/datalib.h"
+#include "support/command_queue.h"
 
-class TimeUtils {
+int main(int argc, char *argv[])
+{
+    Agent * agent;
 
-public:
+    if (argc == 2)
+    {
+        agent = new Agent("", argv[1]);
+    }
+    else
+    {
+        agent = new Agent("", "ntp");
+    }
 
-    string timeString(const std::chrono::system_clock::time_point &tp);
-    std::chrono::system_clock::time_point makeTimePoint(int year, int mon, int day, int hour, int min, int sec);
-    std::chrono::system_clock::time_point timePointUtc();
-    double secondsSinceEpoch();
-    std::chrono::system_clock::duration secondsSinceMidnight();
-    void testSecondsSinceMidnight();
-};
+    while (agent->running())
+    {
+        COSMOS_SLEEP(5.);
+    }
 
-#endif
-
-#endif
+    agent->shutdown();
+}

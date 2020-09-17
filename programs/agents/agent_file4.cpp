@@ -65,7 +65,7 @@
 #define PACKET_SIZE_PAYLOAD (PACKET_SIZE_LO-PACKET_DATA_OFFSET_HEADER_TOTAL)
 #define THROUGHPUT_LO 130
 #define PACKET_SIZE_HI (1472-(PACKET_DATA_OFFSET_HEADER_TOTAL+28))
-#define THROUGHPUT_HI 700
+#define THROUGHPUT_HI 1000
 //#define TRANSFER_QUEUE_LIMIT 10
 #define PACKET_IN 1
 #define PACKET_OUT 2
@@ -105,12 +105,10 @@ typedef struct
     double nmjd;
     double fmjd;
     packet_struct_heartbeat heartbeat;
-    double send_queue;
-    double send_reqmeta;
-    //    bool send_meta;
-    double send_reqdata;
-    //    bool send_data;
-    double send_complete;
+//    double send_queue;
+//    double send_reqmeta;
+//    double send_reqdata;
+//    double send_complete;
 } channelstruc;
 
 static PACKET_CHUNK_SIZE_TYPE default_packet_size=PACKET_SIZE_HI;
@@ -132,17 +130,20 @@ static std::queue<transmit_queue_entry> transmit_queue;
 
 
 //Send and receive thread info
-void send_loop();
-void recv_loop();
-void transmit_loop();
+void send_loop() noexcept;
+void recv_loop() noexcept;
+void transmit_loop() noexcept;
+void profile_check(int32_t line_number, uint16_t thread=0);
+static ElapsedTime tet;
 
 // Mutexes to avoid thread collisions
+static std::mutex txqueue_lock;
 static std::mutex incoming_tx_lock;
 static std::mutex outgoing_tx_lock;
 static std::mutex debug_fd_lock;
 
 static double last_data_receive_time = 0.;
-static double next_reqmeta_time = 0.;
+//static double next_reqmeta_time = 0.;
 
 // Counters to keep track of things
 static uint32_t packet_in_count = 0;
@@ -155,23 +156,25 @@ static uint32_t recv_error_count = 0;
 
 typedef struct
 {
-    bool activity;
+    bool activity = false;
+    bool sendqueue = false;
+    bool sentqueue = false;
+    bool rcvdqueue = false;
+    bool rcvdmeta = false;
+    bool rcvddata = false;
     PACKET_TX_ID_TYPE size;
     PACKET_TX_ID_TYPE next_id;
-    //    PACKET_NODE_ID_TYPE node_id;
     string node_name="";
     tx_progress progress[PROGRESS_QUEUE_SIZE];
-    double completeclock;
-    double dataclock;
-    double metaclock;
-    double queueclock;
-    double heartbeatclock;
+    double heartbeatclock = 0.;
+    double reqmetaclock = 0.;
+    double reqdataclock = 0.;
 }	tx_entry;
 
 typedef struct
 {
     string node_name="";
-    PACKET_NODE_ID_TYPE remote_id;
+    PACKET_NODE_ID_TYPE node_id;
     tx_entry incoming;
     tx_entry outgoing;
 } tx_queue;
@@ -182,6 +185,8 @@ static string log_directory = "temp";
 double logstride_sec = 10.;
 ElapsedTime dt;
 
+int32_t request_send_command(string &request, string &response, Agent *);
+int32_t request_send_message(string &request, string &response, Agent *);
 int32_t request_debug(string &request, string &, Agent *);
 int32_t request_get_channels(string &request, string &response, Agent *agent);
 int32_t request_set_throughput(string &request, string &response, Agent *agent);
@@ -196,7 +201,7 @@ int32_t request_set_logstride(string &request, string &response, Agent *agent);
 int32_t request_get_logstride(string &, string &response, Agent *);
 int32_t outgoing_tx_add(tx_progress &tx_out);
 int32_t outgoing_tx_add(string node_name, string agent_name, string file_name);
-int32_t outgoing_tx_del(uint8_t node, uint16_t tx_id=PROGRESS_QUEUE_SIZE);
+int32_t outgoing_tx_del(uint8_t node, uint16_t tx_id=PROGRESS_QUEUE_SIZE, bool remove_file=true);
 int32_t outgoing_tx_purge(uint8_t node, uint16_t tx_id=PROGRESS_QUEUE_SIZE);
 int32_t outgoing_tx_recount(uint8_t node);
 int32_t outgoing_tx_load(uint8_t node);
@@ -209,7 +214,6 @@ int32_t incoming_tx_recount(uint8_t node);
 vector<file_progress> find_chunks_missing(tx_progress& tx);
 vector<file_progress> find_chunks_togo(tx_progress& tx);
 PACKET_FILE_SIZE_TYPE merge_chunks_overlap(tx_progress& tx);
-void transmit_loop();
 double queuecheck(PACKET_NODE_ID_TYPE node_id);
 int32_t queuesendto(PACKET_NODE_ID_TYPE node_id, string type, vector<PACKET_BYTE> packet);
 int32_t mysendto(string type, int32_t use_channel, vector<PACKET_BYTE>& buf);
@@ -218,20 +222,13 @@ void debug_packet(vector<PACKET_BYTE> buf, uint8_t direction, string type, int32
 int32_t write_meta(tx_progress& tx, double interval=5.);
 int32_t read_meta(tx_progress& tx);
 bool tx_progress_compare_by_size(const tx_progress& a, const tx_progress& b);
-bool filestruc_compare_by_size(const filestruc& a, const filestruc& b);
+bool filestruc_smaller_by_size(const filestruc& a, const filestruc& b);
+bool filestruc_larger_by_size(const filestruc& a, const filestruc& b);
 PACKET_TX_ID_TYPE check_tx_id(tx_entry &txentry, PACKET_TX_ID_TYPE tx_id);
 int32_t check_channel(PACKET_NODE_ID_TYPE node_id);
 int32_t add_node_name(string node_name);
-uint8_t check_local_node_id(PACKET_NODE_ID_TYPE local_id);
-uint8_t lookup_local_node_id(PACKET_NODE_ID_TYPE remote_id);
-uint8_t lookup_local_node_id(string node_name);
-uint8_t check_remote_node_id(PACKET_NODE_ID_TYPE remote_id);
-uint8_t lookup_remote_node_id(PACKET_NODE_ID_TYPE local_id);
-uint8_t lookup_remote_node_id(string node_name);
-uint8_t set_remote_node_id(PACKET_NODE_ID_TYPE node_id, string node_name);
-string get_remote_node_name(PACKET_NODE_ID_TYPE node_id);
-PACKET_TX_ID_TYPE choose_incoming_tx_id(uint8_t node);
-PACKET_TX_ID_TYPE choose_outgoing_tx_id(uint8_t node);
+PACKET_TX_ID_TYPE choose_incoming_tx_id(uint8_t node_id);
+PACKET_TX_ID_TYPE choose_outgoing_tx_id(uint8_t node_id);
 int32_t next_incoming_tx(PACKET_NODE_ID_TYPE node, int32_t use_channel);
 string json_list_incoming();
 string json_list_outgoing();
@@ -254,21 +251,21 @@ int main(int argc, char *argv[])
     agent = new Agent("", "file", 0.);
     if ((iretn = agent->wait()) < 0)
     {
-        fprintf(agent->get_debug_fd(), "%16.10f %s Failed to start Agent %s on Node %s Dated %s : %s\n",currentmjd(), mjd2iso8601(currentmjd()).c_str(), agent->getAgent().c_str(), agent->getNode().c_str(), utc2iso8601(data_ctime(argv[0])).c_str(), cosmos_error_string(iretn).c_str());
+        fprintf(agent->get_debug_fd(), "%.4f %s Failed to start Agent %s on Node %s Dated %s : %s\n",currentmjd(), mjd2iso8601(currentmjd()).c_str(), agent->getAgent().c_str(), agent->getNode().c_str(), utc2iso8601(data_ctime(argv[0])).c_str(), cosmos_error_string(iretn).c_str());
         exit(iretn);
     }
     else
     {
-        fprintf(agent->get_debug_fd(), "%16.10f %s Started Agent %s on Node %s Dated %s\n",currentmjd(), mjd2iso8601(currentmjd()).c_str(), agent->getAgent().c_str(), agent->getNode().c_str(), utc2iso8601(data_ctime(argv[0])).c_str());
+        fprintf(agent->get_debug_fd(), "%.4f %s Started Agent %s on Node %s Dated %s\n",currentmjd(), mjd2iso8601(currentmjd()).c_str(), agent->getAgent().c_str(), agent->getNode().c_str(), utc2iso8601(data_ctime(argv[0])).c_str());
     }
 
-    fprintf(agent->get_debug_fd(), "%16.10f Node: %s Agent: %s - Established\n", currentmjd(), agent->nodeName.c_str(), agent->agentName.c_str());
+    fprintf(agent->get_debug_fd(), "%.4f Node: %s Agent: %s - Established\n", tet.split(), agent->nodeName.c_str(), agent->agentName.c_str());
     fflush(agent->get_debug_fd()); // Ensure this gets printed before blocking call
 
     out_comm_channel.resize(1);
     if((iretn = socket_open(&out_comm_channel[0].chansock, NetworkType::UDP, "", AGENTRECVPORT, SOCKET_LISTEN, SOCKET_BLOCKING, 5000000)) < 0)
     {
-        fprintf(agent->get_debug_fd(), "%16.10f Main: Node: %s Agent: %s - Listening socket failure\n", currentmjd(), agent->nodeName.c_str(), agent->agentName.c_str());
+        fprintf(agent->get_debug_fd(), "%.4f Main: Node: %s Agent: %s - Listening socket failure\n", tet.split(), agent->nodeName.c_str(), agent->agentName.c_str());
         agent->shutdown();
         exit (-errno);
     }
@@ -282,22 +279,33 @@ int main(int argc, char *argv[])
     out_comm_channel[0].node = "";
     out_comm_channel[0].throughput = default_throughput;
     out_comm_channel[0].packet_size = default_packet_size;
-    fprintf(agent->get_debug_fd(), "%16.10f Node: %s Agent: %s - Listening socket open\n", currentmjd(), agent->nodeName.c_str(), agent->agentName.c_str());
+    fprintf(agent->get_debug_fd(), "%.4f Node: %s Agent: %s - Listening socket open\n", tet.split(), agent->nodeName.c_str(), agent->agentName.c_str());
     fflush(agent->get_debug_fd()); // Ensure this gets printed before blocking call
 
     if (argc > 1 && ((argv[1][0] < '0' || argv[1][0] > '9') || argc == 3))
     {
         out_comm_channel.resize(2);
         out_comm_channel[1].node = argv[argc-1];
-        size_t tloc = out_comm_channel[1].node.find(":");
-        if (tloc != string::npos)
+        out_comm_channel[1].throughput = default_throughput;
+        vector <string> cargs = string_split(argv[argc-1], ":");
+        switch (cargs.size())
         {
-            out_comm_channel[1].chanip = out_comm_channel[1].node.substr(tloc+1, out_comm_channel[1].node.size()-tloc+1);
-            out_comm_channel[1].node = out_comm_channel[1].node.substr(0, tloc);
+        case 3:
+            out_comm_channel[1].throughput = stol(cargs[2]);
+        case 2:
+            out_comm_channel[1].chanip = cargs[1];
+        default:
+            out_comm_channel[1].node = cargs[0];
         }
+//        size_t tloc = out_comm_channel[1].node.find(':');
+//        if (tloc != string::npos)
+//        {
+//            out_comm_channel[1].chanip = out_comm_channel[1].node.substr(tloc+1, out_comm_channel[1].node.size()-tloc+1);
+//            out_comm_channel[1].node = out_comm_channel[1].node.substr(0, tloc);
+//        }
         if((iretn = socket_open(&out_comm_channel[1].chansock, NetworkType::UDP, out_comm_channel[1].chanip.c_str(), AGENTRECVPORT, SOCKET_TALK, SOCKET_BLOCKING, AGENTRCVTIMEO)) < 0)
         {
-            fprintf(agent->get_debug_fd(), "%16.10f Node: %s IP: %s - Sending socket failure\n", currentmjd(), out_comm_channel[1].node.c_str(), out_comm_channel[1].chanip.c_str());
+            fprintf(agent->get_debug_fd(), "%.4f Node: %s IP: %s - Sending socket failure\n", tet.split(), out_comm_channel[1].node.c_str(), out_comm_channel[1].chanip.c_str());
             agent->shutdown();
             exit (-errno);
         }
@@ -305,9 +313,8 @@ int main(int argc, char *argv[])
         out_comm_channel[1].limjd = out_comm_channel[1].nmjd;
         out_comm_channel[1].lomjd = out_comm_channel[1].nmjd;
         out_comm_channel[1].fmjd = out_comm_channel[1].nmjd;
-        out_comm_channel[1].throughput = default_throughput;
         out_comm_channel[1].packet_size = default_packet_size;
-        fprintf(agent->get_debug_fd(), "%16.10f Network: Old: %u %s %s %u\n", currentmjd(), 1, out_comm_channel[1].node.c_str(), out_comm_channel[1].chanip.c_str(), ntohs(out_comm_channel[1].chansock.caddr.sin_port));
+        fprintf(agent->get_debug_fd(), "%.4f Network: Old: %u %s %s %u\n", tet.split(), 1, out_comm_channel[1].node.c_str(), out_comm_channel[1].chanip.c_str(), ntohs(out_comm_channel[1].chansock.caddr.sin_port));
         fflush(agent->get_debug_fd());
 
         log_directory = "temp"; // put log files in node/outgoing/file
@@ -323,15 +330,27 @@ int main(int argc, char *argv[])
         agent->debug_level = 0;
     }
 
+    // Initialize Transfer Queue
+    if ((iretn = load_nodeids()) < 1)
+    {
+        fprintf(agent->get_debug_fd(), "%.4f Couldn't load node lookup tablee\n", tet.split());
+        agent->shutdown();
+        exit (iretn);
+    }
+    txq.resize(iretn);
+    for (uint16_t i=1; i<iretn; ++i)
+    {
+        if (check_node_id(i) > 0)
+        {
+            txq[i].node_id = i;
+            txq[i].node_name = lookup_node_id_name(i);
+        }
+    }
+
     // Restore in progress transfers from previous run
     for (string node_name : data_list_nodes())
     {
-        int32_t local_node = lookup_local_node_id(node_name);
-
-        if (local_node == 0)
-        {
-            local_node = add_node_name(node_name);
-        }
+//        int32_t node_id = add_node_name(node_name);
 
         for(filestruc file : data_list_files(node_name, "temp", "file"))
         {
@@ -389,6 +408,10 @@ int main(int argc, char *argv[])
     if ((iretn=agent->add_request("get_logstride",request_get_logstride,"","get time interval of log files")))
         exit (iretn);
     if ((iretn=agent->add_request("debug",request_debug,"{0|1}","Toggle Debug information")))
+        exit (iretn);
+    if ((iretn=agent->add_request("command",request_send_command,"nodename command","Submit command in event format to agent_file on requested Node")))
+        exit (iretn);
+    if ((iretn=agent->add_request("message",request_send_message,"nodename message","Send message to agent_file on requested Node")))
         exit (iretn);
 
     double nextdiskcheck = currentmjd(0.);
@@ -455,7 +478,7 @@ int main(int argc, char *argv[])
 
     if (agent->debug_level)
     {
-        fprintf(agent->get_debug_fd(), "%16.10f %.4f Main: Node: %s Agent: %s - Exiting\n", currentmjd(), dt.lap(), agent->nodeName.c_str(), agent->agentName.c_str());
+        fprintf(agent->get_debug_fd(), "%.4f %.4f Main: Node: %s Agent: %s - Exiting\n", tet.split(), dt.lap(), agent->nodeName.c_str(), agent->agentName.c_str());
         fflush(agent->get_debug_fd());
     }
 
@@ -467,7 +490,7 @@ int main(int argc, char *argv[])
 
     if (agent->debug_level)
     {
-        fprintf(agent->get_debug_fd(), "%16.10f %.4f Main: Node: %s Agent: %s - Shutting down\n", currentmjd(), dt.lap(), agent->nodeName.c_str(), agent->agentName.c_str());
+        fprintf(agent->get_debug_fd(), "%.4f %.4f Main: Node: %s Agent: %s - Shutting down\n", tet.split(), dt.lap(), agent->nodeName.c_str(), agent->agentName.c_str());
         fflush(agent->get_debug_fd());
     }
 
@@ -476,7 +499,7 @@ int main(int argc, char *argv[])
     exit (0);
 }
 
-void recv_loop()
+void recv_loop() noexcept
 {
     vector<PACKET_BYTE> recvbuf;
     string partial_filepath;
@@ -502,40 +525,34 @@ void recv_loop()
             inet_ntop(rchannel.caddr.sin_family, &rchannel.caddr.sin_addr, rchannel.address, sizeof(rchannel.address));
 
             // Check channels, update information if we are already handling it, otherwise add channel
-            string node_name = "";
-            uint8_t local_node = 0;
-            uint8_t remote_node = recvbuf[PACKET_HEADER_OFFSET_NODE_ID];
+            string packet_node_name;
+            string node_name = lookup_node_id_name(recvbuf[PACKET_HEADER_OFFSET_NODE_ID]);
+            int32_t node_id = check_node_id(recvbuf[PACKET_HEADER_OFFSET_NODE_ID]);
             switch (recvbuf[0] & 0x0f)
             {
             case PACKET_HEARTBEAT:
             case PACKET_REQQUEUE:
             case PACKET_QUEUE:
             case PACKET_REQMETA:
-                node_name = reinterpret_cast<char *>(&recvbuf[PACKET_HEADER_OFFSET_NODE_NAME]);
-                local_node = lookup_local_node_id(node_name);
-                if (local_node == 0)
-                {
-                    local_node = add_node_name(node_name);
-                }
-                txq[local_node].remote_id = remote_node;
+                packet_node_name = reinterpret_cast<char *>(&recvbuf[PACKET_HEADER_OFFSET_NODE_NAME]);
                 break;
             case PACKET_METADATA:
             case PACKET_REQDATA:
             case PACKET_DATA:
             case PACKET_COMPLETE:
             case PACKET_CANCEL:
-                local_node = lookup_local_node_id(remote_node);
-                if (local_node > 0)
-                {
-                    node_name = txq[local_node].node_name;
-                }
                 break;
             }
 
-            if (local_node == 0 || node_name.empty())
+            if (node_id <= 0 || node_name.empty())
             {
                 continue;
             }
+
+            txq[node_id].incoming.rcvdqueue = false;
+            txq[node_id].incoming.rcvdmeta = false;
+            txq[node_id].incoming.rcvddata = false;
+            incoming_tx_lock.unlock();
 
             use_channel = static_cast <uint16_t>(out_comm_channel.size());
             for (uint16_t i=0; i<out_comm_channel.size(); ++i)
@@ -570,6 +587,32 @@ void recv_loop()
             // Respond appropriately according to type of packet
             switch (recvbuf[0] & 0x0f)
             {
+            case PACKET_COMMAND:
+                {
+                packet_struct_command command;
+
+                extract_command(recvbuf, command);
+
+                FILE *fp = data_open(("/cosmos/nodes/" + agent->nodeName + "/incoming/exec/file.command").c_str(), "w");
+                if (fp)
+                {
+                    fwrite(&command.bytes[0], 1, command.length, fp);
+                    fclose(fp);
+                }
+                }
+                break;
+            case PACKET_MESSAGE:
+                {
+                    packet_struct_message message;
+
+                    extract_message(recvbuf, message);
+
+                    string imessage;
+                    imessage.resize(message.length);
+                    memcpy(&imessage[0], message.bytes, message.length);
+                    log_write(lookup_node_id_name(message.node_id), "file", tet.split(), "", "message", imessage, "incoming");
+                }
+                break;
             case PACKET_HEARTBEAT:
                 {
                     packet_struct_heartbeat heartbeat;
@@ -577,26 +620,31 @@ void recv_loop()
                     extract_heartbeat(recvbuf, heartbeat);
 
                     out_comm_channel[use_channel].heartbeat = heartbeat;
+                    txq[node_id].outgoing.sendqueue = true;
+                    txq[node_id].outgoing.sentqueue = false;
                 }
                 break;
             case PACKET_REQQUEUE:
                 {
                     packet_struct_reqqueue reqqueue;
-                    txq[local_node].outgoing.queueclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
 
                     extract_reqqueue(recvbuf, reqqueue);
 
-                    out_comm_channel[use_channel].send_queue = true;
+                    txq[node_id].outgoing.sendqueue = true;
+                    txq[node_id].outgoing.sentqueue = false;
                 }
                 break;
             case PACKET_QUEUE:
                 {
                     packet_struct_queue queue;
-                    txq[local_node].incoming.queueclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
 
                     extract_queue(recvbuf, queue);
 
                     incoming_tx_lock.lock();
+
+                    txq[node_id].incoming.sentqueue = true;
+                    txq[node_id].incoming.sendqueue = false;
+                    txq[(node_id)].incoming.rcvdqueue = true;
 
                     // Sort through incoming queue and remove anything not in sent queue
                     for (uint16_t tx_id=1; tx_id<PROGRESS_QUEUE_SIZE; ++tx_id)
@@ -604,7 +652,7 @@ void recv_loop()
                         bool valid = false;
                         for (uint16_t i=0; i<TRANSFER_QUEUE_LIMIT; ++i)
                         {
-                            if (queue.tx_id[i] && txq[local_node].incoming.progress[tx_id].tx_id == queue.tx_id[i])
+                            if (queue.tx_id[i] && txq[node_id].incoming.progress[tx_id].tx_id == queue.tx_id[i])
                             {
                                 // This is an incoming file we should handle
                                 valid = true;
@@ -612,10 +660,10 @@ void recv_loop()
                             }
                         }
 
-                        if (txq[local_node].incoming.progress[tx_id].tx_id && !valid)
+                        if (txq[node_id].incoming.progress[tx_id].tx_id && !valid)
                         {
                             // This is not an incoming file we should handle
-                            incoming_tx_del(local_node, tx_id);
+                            incoming_tx_del(node_id, tx_id);
                         }
                     }
 
@@ -624,7 +672,7 @@ void recv_loop()
                     {
                         if (queue.tx_id[i])
                         {
-                            PACKET_TX_ID_TYPE tx_id = check_tx_id(txq[local_node].incoming, queue.tx_id[i]);
+                            PACKET_TX_ID_TYPE tx_id = check_tx_id(txq[node_id].incoming, queue.tx_id[i]);
 
                             if (tx_id == 0)
                             {
@@ -640,23 +688,22 @@ void recv_loop()
             case PACKET_REQMETA:
                 {
                     packet_struct_reqmeta reqmeta;
-                    txq[local_node].outgoing.queueclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                    txq[local_node].outgoing.metaclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
 
                     extract_reqmeta(recvbuf, reqmeta);
 
                     outgoing_tx_lock.lock();
+                    txq[node_id].outgoing.sentqueue = false;
 
                     // Send requested META packets
-                    if (txq[local_node].remote_id > 0)
+                    if (txq[node_id].node_id > 0)
                     {
                         for (uint16_t i=0; i<TRANSFER_QUEUE_LIMIT; ++i)
                         {
-                            PACKET_TX_ID_TYPE tx_id = check_tx_id(txq[local_node].outgoing, reqmeta.tx_id[i]);
+                            PACKET_TX_ID_TYPE tx_id = check_tx_id(txq[node_id].outgoing, reqmeta.tx_id[i]);
                             if (tx_id > 0)
                             {
-                                txq[local_node].outgoing.progress[tx_id].sendmeta = true;
-                                txq[local_node].outgoing.progress[tx_id].sentmeta = false;
+                                txq[node_id].outgoing.progress[tx_id].sendmeta = true;
+                                txq[node_id].outgoing.progress[tx_id].sentmeta = false;
                             }
                         }
                     }
@@ -666,14 +713,12 @@ void recv_loop()
             case PACKET_METADATA:
                 {
                     packet_struct_metashort meta;
-                    txq[local_node].incoming.queueclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                    txq[local_node].incoming.metaclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
 
                     extract_metadata(recvbuf, meta);
 
                     incoming_tx_lock.lock();
 
-                   incoming_tx_update(meta);
+                    incoming_tx_update(meta);
 
                     incoming_tx_lock.unlock();
 
@@ -682,9 +727,6 @@ void recv_loop()
             case PACKET_REQDATA:
                 {
                     packet_struct_reqdata reqdata;
-                    txq[local_node].outgoing.queueclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                    txq[local_node].outgoing.metaclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                    txq[local_node].outgoing.dataclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
 
                     extract_reqdata(recvbuf, reqdata);
 
@@ -696,11 +738,20 @@ void recv_loop()
 
                     outgoing_tx_lock.lock();
 
-                    PACKET_TX_ID_TYPE tx_id = check_tx_id(txq[local_node].outgoing, reqdata.tx_id);
+                    PACKET_TX_ID_TYPE tx_id = check_tx_id(txq[node_id].outgoing, reqdata.tx_id);
                     // tx_id now points to the valid entry to which we should add the data
 
                     if (tx_id > 0)
                     {
+                        // Perform sanity check
+//                        if (reqdata.hole_start >= txq[node_id].outgoing.progress[tx_id].file_size || reqdata.hole_end > txq[node_id].outgoing.progress[tx_id].file_size)
+//                            {
+//                                outgoing_tx_del(node_id, tx_id, false);
+//                                continue;
+//                            }
+                        txq[node_id].outgoing.progress[tx_id].sendmeta = false;
+                        txq[node_id].outgoing.progress[tx_id].sentmeta = true;
+
                         // Add this chunk to the queue
                         file_progress tp;
                         tp.chunk_start = reqdata.hole_start;
@@ -709,53 +760,53 @@ void recv_loop()
 
                         uint32_t check=0;
                         // Anything in the queue yet?
-                        if (!txq[local_node].outgoing.progress[tx_id].file_info.size())
+                        if (!txq[node_id].outgoing.progress[tx_id].file_info.size())
                         {
                             // Add first entry
-                            txq[local_node].outgoing.progress[tx_id].file_info.push_back(tp);
-                            txq[local_node].outgoing.progress[tx_id].total_bytes += byte_count;
+                            txq[node_id].outgoing.progress[tx_id].file_info.push_back(tp);
+                            txq[node_id].outgoing.progress[tx_id].total_bytes += byte_count;
                         }
                         else
                         {
                             // Check against existing data
-                            for (uint32_t j=0; j<txq[local_node].outgoing.progress[tx_id].file_info.size(); ++j)
+                            for (uint32_t j=0; j<txq[node_id].outgoing.progress[tx_id].file_info.size(); ++j)
                             {
                                 // If we match this entry
-                                if (tp.chunk_start == txq[local_node].outgoing.progress[tx_id].file_info[j].chunk_start && tp.chunk_end == txq[local_node].outgoing.progress[tx_id].file_info[j].chunk_end)
+                                if (tp.chunk_start == txq[node_id].outgoing.progress[tx_id].file_info[j].chunk_start && tp.chunk_end == txq[node_id].outgoing.progress[tx_id].file_info[j].chunk_end)
                                 {
                                     break;
                                 }
                                 // If we start before this entry
-                                if (tp.chunk_start < txq[local_node].outgoing.progress[tx_id].file_info[j].chunk_start)
+                                if (tp.chunk_start < txq[node_id].outgoing.progress[tx_id].file_info[j].chunk_start)
                                 {
                                     // If we end before this entry (at least one byte between), insert
-                                    if (tp.chunk_end + 1 < txq[local_node].outgoing.progress[tx_id].file_info[j].chunk_start)
+                                    if (tp.chunk_end + 1 < txq[node_id].outgoing.progress[tx_id].file_info[j].chunk_start)
                                     {
-                                        txq[local_node].outgoing.progress[tx_id].file_info.insert(txq[local_node].outgoing.progress[tx_id].file_info.begin()+j, tp);
-                                        txq[local_node].outgoing.progress[tx_id].total_bytes += byte_count;
+                                        txq[node_id].outgoing.progress[tx_id].file_info.insert(txq[node_id].outgoing.progress[tx_id].file_info.begin()+j, tp);
+                                        txq[node_id].outgoing.progress[tx_id].total_bytes += byte_count;
                                         break;
                                     }
                                     // Otherwise, extend the near end
                                     else
                                     {
-                                        tp.chunk_end = txq[local_node].outgoing.progress[tx_id].file_info[j].chunk_start - 1;
-                                        txq[local_node].outgoing.progress[tx_id].file_info[j].chunk_start = tp.chunk_start;
+                                        tp.chunk_end = txq[node_id].outgoing.progress[tx_id].file_info[j].chunk_start - 1;
+                                        txq[node_id].outgoing.progress[tx_id].file_info[j].chunk_start = tp.chunk_start;
                                         byte_count = (tp.chunk_end - tp.chunk_start) + 1;
-                                        txq[local_node].outgoing.progress[tx_id].total_bytes += byte_count;
+                                        txq[node_id].outgoing.progress[tx_id].total_bytes += byte_count;
                                         break;
                                     }
                                 }
                                 else
                                 {
                                     // If we overlap on the end, extend the far end
-                                    if (tp.chunk_start <= txq[local_node].outgoing.progress[tx_id].file_info[j].chunk_end + 1)
+                                    if (tp.chunk_start <= txq[node_id].outgoing.progress[tx_id].file_info[j].chunk_end + 1)
                                     {
-                                        if (tp.chunk_end > txq[local_node].outgoing.progress[tx_id].file_info[j].chunk_end)
+                                        if (tp.chunk_end > txq[node_id].outgoing.progress[tx_id].file_info[j].chunk_end)
                                         {
-                                            byte_count = tp.chunk_end - txq[local_node].outgoing.progress[tx_id].file_info[j].chunk_end;
-                                            tp.chunk_start = txq[local_node].outgoing.progress[tx_id].file_info[j].chunk_end + 1;
-                                            txq[local_node].outgoing.progress[tx_id].file_info[j].chunk_end = tp.chunk_end;
-                                            txq[local_node].outgoing.progress[tx_id].total_bytes += byte_count;
+                                            byte_count = tp.chunk_end - txq[node_id].outgoing.progress[tx_id].file_info[j].chunk_end;
+                                            tp.chunk_start = txq[node_id].outgoing.progress[tx_id].file_info[j].chunk_end + 1;
+                                            txq[node_id].outgoing.progress[tx_id].file_info[j].chunk_end = tp.chunk_end;
+                                            txq[node_id].outgoing.progress[tx_id].total_bytes += byte_count;
                                             break;
                                         }
                                     }
@@ -765,20 +816,22 @@ void recv_loop()
 
 
                             // If we are higher than everything currently in the list, then append
-                            if (check == txq[local_node].outgoing.progress[tx_id].file_info.size())
+                            if (check == txq[node_id].outgoing.progress[tx_id].file_info.size())
                             {
-                                txq[local_node].outgoing.progress[tx_id].file_info.push_back(tp);
-                                txq[local_node].outgoing.progress[tx_id].total_bytes += byte_count;
+                                txq[node_id].outgoing.progress[tx_id].file_info.push_back(tp);
+                                txq[node_id].outgoing.progress[tx_id].total_bytes += byte_count;
                             }
 
                         }
 
                         // Save meta to disk
-                        write_meta(txq[local_node].outgoing.progress[tx_id]);
-                        txq[local_node].outgoing.progress[tx_id].senddata = true;
-                        txq[local_node].outgoing.progress[tx_id].sentdata = false;
-                        txq[local_node].outgoing.progress[tx_id].sentmeta = true;
-                        txq[local_node].outgoing.progress[tx_id].complete = false;
+                        write_meta(txq[node_id].outgoing.progress[tx_id]);
+                        txq[node_id].outgoing.sendqueue = false;
+                        txq[node_id].outgoing.sentqueue = true;
+                        txq[node_id].outgoing.progress[tx_id].senddata = true;
+                        txq[node_id].outgoing.progress[tx_id].sentdata = false;
+                        txq[node_id].outgoing.progress[tx_id].sendmeta = false;
+                        txq[node_id].outgoing.progress[tx_id].sentmeta = true;
                     }
 
                     outgoing_tx_lock.unlock();
@@ -787,9 +840,6 @@ void recv_loop()
             case PACKET_DATA:
                 {
                     packet_struct_data data;
-                    txq[local_node].incoming.queueclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                    txq[local_node].incoming.metaclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                    txq[local_node].incoming.dataclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
 
                     extract_data(recvbuf, data.node_id, data.tx_id, data.byte_count, data.chunk_start, data.chunk);
 
@@ -799,11 +849,13 @@ void recv_loop()
 
                     incoming_tx_lock.lock();
 
-                    PACKET_TX_ID_TYPE tx_id = check_tx_id(txq[local_node].incoming, data.tx_id);
+                    PACKET_TX_ID_TYPE tx_id = check_tx_id(txq[node_id].incoming, data.tx_id);
 
                     // Update corresponding incoming queue entry if it exists
                     if (tx_id > 0)
                     {
+                        txq[node_id].incoming.rcvddata = true;
+                        txq[node_id].incoming.progress[tx_id].datatime = currentmjd();
 
                         // tx_id now points to the valid entry to which we should add the data
                         file_progress tp;
@@ -818,42 +870,42 @@ void recv_loop()
                         bool updated = false;
 
                         // Do we have any data yet?
-                        if (!txq[local_node].incoming.progress[tx_id].file_info.size())
+                        if (!txq[node_id].incoming.progress[tx_id].file_info.size())
                         {
                             // Add first entry, then write data
-                            txq[local_node].incoming.progress[tx_id].file_info.push_back(tp);
-                            txq[local_node].incoming.progress[tx_id].total_bytes += data.byte_count;
+                            txq[node_id].incoming.progress[tx_id].file_info.push_back(tp);
+                            txq[node_id].incoming.progress[tx_id].total_bytes += data.byte_count;
                             updated = true;
                         }
                         else
                         {
                             // Check against existing data
-                            for (uint32_t j=0; j<txq[local_node].incoming.progress[tx_id].file_info.size(); ++j)
+                            for (uint32_t j=0; j<txq[node_id].incoming.progress[tx_id].file_info.size(); ++j)
                             {
                                 // Check for duplicate
-                                if (tp.chunk_start >= txq[local_node].incoming.progress[tx_id].file_info[j].chunk_start && tp.chunk_end <= txq[local_node].incoming.progress[tx_id].file_info[j].chunk_end)
+                                if (tp.chunk_start >= txq[node_id].incoming.progress[tx_id].file_info[j].chunk_start && tp.chunk_end <= txq[node_id].incoming.progress[tx_id].file_info[j].chunk_end)
                                 {
                                     duplicate = true;
                                     break;
                                 }
                                 // If we start before this entry
-                                if (tp.chunk_start < txq[local_node].incoming.progress[tx_id].file_info[j].chunk_start)
+                                if (tp.chunk_start < txq[node_id].incoming.progress[tx_id].file_info[j].chunk_start)
                                 {
                                     // If we end before this entry (at least one byte between), insert
-                                    if (tp.chunk_end + 1 < txq[local_node].incoming.progress[tx_id].file_info[j].chunk_start)
+                                    if (tp.chunk_end + 1 < txq[node_id].incoming.progress[tx_id].file_info[j].chunk_start)
                                     {
-                                        txq[local_node].incoming.progress[tx_id].file_info.insert(txq[local_node].incoming.progress[tx_id].file_info.begin()+j, tp);
-                                        txq[local_node].incoming.progress[tx_id].total_bytes += data.byte_count;
+                                        txq[node_id].incoming.progress[tx_id].file_info.insert(txq[node_id].incoming.progress[tx_id].file_info.begin()+j, tp);
+                                        txq[node_id].incoming.progress[tx_id].total_bytes += data.byte_count;
                                         updated = true;
                                         break;
                                     }
                                     // Otherwise, extend the near end
                                     else
                                     {
-                                        tp.chunk_end = txq[local_node].incoming.progress[tx_id].file_info[j].chunk_start - 1;
-                                        txq[local_node].incoming.progress[tx_id].file_info[j].chunk_start = tp.chunk_start;
+                                        tp.chunk_end = txq[node_id].incoming.progress[tx_id].file_info[j].chunk_start - 1;
+                                        txq[node_id].incoming.progress[tx_id].file_info[j].chunk_start = tp.chunk_start;
                                         data.byte_count = (tp.chunk_end - tp.chunk_start) + 1;
-                                        txq[local_node].incoming.progress[tx_id].total_bytes += data.byte_count;
+                                        txq[node_id].incoming.progress[tx_id].total_bytes += data.byte_count;
                                         updated = true;
                                         break;
                                     }
@@ -861,14 +913,14 @@ void recv_loop()
                                 else
                                 {
                                     // If we overlap on the end, extend the far end
-                                    if (tp.chunk_start <= txq[local_node].incoming.progress[tx_id].file_info[j].chunk_end + 1)
+                                    if (tp.chunk_start <= txq[node_id].incoming.progress[tx_id].file_info[j].chunk_end + 1)
                                     {
-                                        if (tp.chunk_end > txq[local_node].incoming.progress[tx_id].file_info[j].chunk_end)
+                                        if (tp.chunk_end > txq[node_id].incoming.progress[tx_id].file_info[j].chunk_end)
                                         {
-                                            data.byte_count = tp.chunk_end - txq[local_node].incoming.progress[tx_id].file_info[j].chunk_end;
-                                            tp.chunk_start = txq[local_node].incoming.progress[tx_id].file_info[j].chunk_end + 1;
-                                            txq[local_node].incoming.progress[tx_id].file_info[j].chunk_end = tp.chunk_end;
-                                            txq[local_node].incoming.progress[tx_id].total_bytes += data.byte_count;
+                                            data.byte_count = tp.chunk_end - txq[node_id].incoming.progress[tx_id].file_info[j].chunk_end;
+                                            tp.chunk_start = txq[node_id].incoming.progress[tx_id].file_info[j].chunk_end + 1;
+                                            txq[node_id].incoming.progress[tx_id].file_info[j].chunk_end = tp.chunk_end;
+                                            txq[node_id].incoming.progress[tx_id].total_bytes += data.byte_count;
                                             updated = true;
                                             break;
                                         }
@@ -879,10 +931,10 @@ void recv_loop()
 
 
                             // If we are higher than everything currently in the list, then append
-                            if (!duplicate && check == txq[local_node].incoming.progress[tx_id].file_info.size())
+                            if (!duplicate && check == txq[node_id].incoming.progress[tx_id].file_info.size())
                             {
-                                txq[local_node].incoming.progress[tx_id].file_info.push_back(tp);
-                                txq[local_node].incoming.progress[tx_id].total_bytes += data.byte_count;
+                                txq[node_id].incoming.progress[tx_id].file_info.push_back(tp);
+                                txq[node_id].incoming.progress[tx_id].total_bytes += data.byte_count;
                                 updated = true;
                             }
 
@@ -892,36 +944,36 @@ void recv_loop()
                         if (updated)
                         {
                             // Write incoming data to disk
-                            if (txq[local_node].incoming.progress[tx_id].fp == nullptr)
+                            if (txq[node_id].incoming.progress[tx_id].fp == nullptr)
                             {
-                                partial_filepath = txq[local_node].incoming.progress[tx_id].temppath + ".file";
+                                partial_filepath = txq[node_id].incoming.progress[tx_id].temppath + ".file";
                                 if (data_exists(partial_filepath))
                                 {
-                                    txq[local_node].incoming.progress[tx_id].fp = fopen(partial_filepath.c_str(), "r+");
+                                    txq[node_id].incoming.progress[tx_id].fp = fopen(partial_filepath.c_str(), "r+");
                                 }
                                 else
                                 {
-                                    txq[local_node].incoming.progress[tx_id].fp = fopen(partial_filepath.c_str(), "w");
+                                    txq[node_id].incoming.progress[tx_id].fp = fopen(partial_filepath.c_str(), "w");
                                 }
                             }
 
-                            if (txq[local_node].incoming.progress[tx_id].fp == nullptr)
+                            if (txq[node_id].incoming.progress[tx_id].fp == nullptr)
                             {
                                 if (agent->debug_level)
                                 {
                                     debug_fd_lock.lock();
-                                    fprintf(agent->get_debug_fd(), "%16.10f %.4f Incoming: File Error: %s %s on ID: %u Chunk: %u\n", currentmjd(), dt.lap(), partial_filepath.c_str(), cosmos_error_string(-errno).c_str(), tx_id, tp.chunk_start);
+                                    fprintf(agent->get_debug_fd(), "%.4f %.4f Incoming: File Error: %s %s on ID: %u Chunk: %u\n", tet.split(), dt.lap(), partial_filepath.c_str(), cosmos_error_string(-errno).c_str(), tx_id, tp.chunk_start);
                                     fflush(agent->get_debug_fd());
                                     debug_fd_lock.unlock();
                                 }
                             }
                             else
                             {
-                                fseek(txq[local_node].incoming.progress[tx_id].fp, tp.chunk_start, SEEK_SET);
-                                fwrite(data.chunk, data.byte_count, 1, txq[local_node].incoming.progress[tx_id].fp);
-                                fflush(txq[local_node].incoming.progress[tx_id].fp);
+                                fseek(txq[node_id].incoming.progress[tx_id].fp, tp.chunk_start, SEEK_SET);
+                                fwrite(data.chunk, data.byte_count, 1, txq[node_id].incoming.progress[tx_id].fp);
+                                fflush(txq[node_id].incoming.progress[tx_id].fp);
                                 // Write latest meta data to disk
-                                write_meta(txq[local_node].incoming.progress[tx_id]);
+                                write_meta(txq[node_id].incoming.progress[tx_id]);
                                 if (agent->debug_level)
                                 {
                                     uint32_t total = 0;
@@ -935,52 +987,51 @@ void recv_loop()
                         }
 
                         // Check if file has been completely received
-                        if(txq[local_node].incoming.progress[tx_id].file_size == txq[local_node].incoming.progress[tx_id].total_bytes && txq[local_node].incoming.progress[tx_id].havemeta)
-                        {
-                            // See if we know what the remote node_id is for this
-                            if (txq[local_node].remote_id > 0)
-                            {
-                                tx_progress tx_in = txq[local_node].incoming.progress[tx_id];
-                                if (agent->debug_level)
-                                {
-                                    debug_fd_lock.lock();
-                                    fprintf(agent->get_debug_fd(), "%16.10f %.4f Incoming: Complete: %u %s %u %u\n", currentmjd(), dt.lap(), tx_in.tx_id, tx_in.node_name.c_str(), tx_in.file_size, tx_in.total_bytes);
-                                    fflush(agent->get_debug_fd());
-                                    debug_fd_lock.unlock();
-                                }
+//                        if(txq[node_id].incoming.progress[tx_id].file_size == txq[node_id].incoming.progress[tx_id].total_bytes && txq[node_id].incoming.progress[tx_id].havemeta)
+//                        {
+//                            // See if we know what the remote node_id is for this
+//                            if (txq[node_id].node_id > 0)
+//                            {
+//                                tx_progress tx_in = txq[node_id].incoming.progress[tx_id];
+//                                if (agent->debug_level)
+//                                {
+//                                    debug_fd_lock.lock();
+//                                    fprintf(agent->get_debug_fd(), "%.4f %.4f Incoming: Complete: %u %s %u %u\n", tet.split(), dt.lap(), tx_in.tx_id, tx_in.node_name.c_str(), tx_in.file_size, tx_in.total_bytes);
+//                                    fflush(agent->get_debug_fd());
+//                                    debug_fd_lock.unlock();
+//                                }
 
-                                // Move file to its final location
-                                if (!txq[local_node].incoming.progress[tx_id].complete)
-                                {
-                                    if (txq[local_node].incoming.progress[tx_id].fp != nullptr)
-                                    {
-                                        fclose(txq[local_node].incoming.progress[tx_id].fp);
-                                        txq[local_node].incoming.progress[tx_id].fp = nullptr;
-                                    }
-                                    string final_filepath = tx_in.temppath + ".file";
-                                    int iret = rename(final_filepath.c_str(), tx_in.filepath.c_str());
-                                    // Make sure metadata is recorded
-                                    write_meta(txq[local_node].incoming.progress[tx_id], 0.);
-                                    if (agent->debug_level)
-                                    {
-                                        debug_fd_lock.lock();
-                                        fprintf(agent->get_debug_fd(), "%16.10f %.4f Incoming: Renamed/Data: %d %s\n", currentmjd(), dt.lap(), iret, tx_in.filepath.c_str());
-                                        fflush(agent->get_debug_fd());
-                                        debug_fd_lock.unlock();
-                                    }
+//                                // Move file to its final location
+//                                if (!txq[node_id].incoming.progress[tx_id].complete)
+//                                {
+//                                    if (txq[node_id].incoming.progress[tx_id].fp != nullptr)
+//                                    {
+//                                        fclose(txq[node_id].incoming.progress[tx_id].fp);
+//                                        txq[node_id].incoming.progress[tx_id].fp = nullptr;
+//                                    }
+//                                    string final_filepath = tx_in.temppath + ".file";
+//                                    int iret = rename(final_filepath.c_str(), tx_in.filepath.c_str());
+//                                    // Make sure metadata is recorded
+//                                    write_meta(txq[node_id].incoming.progress[tx_id], 0.);
+//                                    if (agent->debug_level)
+//                                    {
+//                                        debug_fd_lock.lock();
+//                                        fprintf(agent->get_debug_fd(), "%.4f %.4f Incoming: Renamed/Data: %d %s\n", tet.split(), dt.lap(), iret, tx_in.filepath.c_str());
+//                                        fflush(agent->get_debug_fd());
+//                                        debug_fd_lock.unlock();
+//                                    }
 
-                                    // Mark complete
-                                    txq[local_node].incoming.progress[tx_id].complete = true;
-                                    txq[local_node].incoming.progress[tx_id].senddata = false;
-                                    txq[local_node].incoming.progress[tx_id].sentdata = true;
-                                    out_comm_channel[use_channel].send_complete = true;
-                                }
-                            }
-                        }
+//                                    // Mark complete
+//                                    txq[node_id].incoming.progress[tx_id].complete = true;
+//                                    txq[node_id].incoming.progress[tx_id].senddata = false;
+//                                    txq[node_id].incoming.progress[tx_id].sentdata = true;
+//                                }
+//                            }
+//                        }
                     }
                     else
                     {
-                        txq[local_node].incoming.progress[data.tx_id].sendmeta = true;
+                        txq[node_id].incoming.progress[data.tx_id].sendmeta = true;
                     }
 
                     incoming_tx_lock.unlock();
@@ -990,20 +1041,20 @@ void recv_loop()
             case PACKET_COMPLETE:
                 {
                     packet_struct_complete complete;
-                    txq[local_node].outgoing.queueclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                    txq[local_node].outgoing.metaclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                    txq[local_node].outgoing.dataclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                    txq[local_node].outgoing.completeclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
 
                     extract_complete(recvbuf, complete);
 
                     outgoing_tx_lock.lock();
 
-                    PACKET_TX_ID_TYPE tx_id = check_tx_id(txq[local_node].outgoing, complete.tx_id);
+                    PACKET_TX_ID_TYPE tx_id = check_tx_id(txq[node_id].outgoing, complete.tx_id);
 
                     if (tx_id > 0)
                     {
-                        txq[local_node].outgoing.progress[tx_id].complete = true;
+                        txq[node_id].outgoing.progress[tx_id].complete = true;
+                        txq[node_id].outgoing.progress[tx_id].senddata = false;
+                        txq[node_id].outgoing.progress[tx_id].sendmeta = false;
+                        txq[node_id].outgoing.sendqueue = true;
+                        txq[node_id].outgoing.sentqueue = false;
                     }
 
                     outgoing_tx_lock.unlock();
@@ -1011,22 +1062,20 @@ void recv_loop()
                 }
             case PACKET_CANCEL:
                 {
+                    profile_check(__LINE__, 1);
+
                     packet_struct_complete cancel;
-                    txq[local_node].incoming.queueclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                    txq[local_node].incoming.metaclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                    txq[local_node].incoming.dataclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                    txq[local_node].incoming.completeclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
 
                     extract_complete(recvbuf, cancel);
 
                     incoming_tx_lock.lock();
 
-                    PACKET_TX_ID_TYPE tx_id = check_tx_id(txq[local_node].incoming, cancel.tx_id);
+                    PACKET_TX_ID_TYPE tx_id = check_tx_id(txq[node_id].incoming, cancel.tx_id);
 
                     if (tx_id > 0)
                     {
                         // Remove the transaction
-                        incoming_tx_del(local_node, tx_id);
+                        incoming_tx_del(node_id, tx_id);
                     }
 
                     incoming_tx_lock.unlock();
@@ -1036,6 +1085,8 @@ void recv_loop()
                 ++type_error_count;
                 break;
             }
+            profile_check(__LINE__, 1);
+
         }
     }
 
@@ -1053,7 +1104,7 @@ void recv_loop()
 
 }
 
-void send_loop()
+void send_loop() noexcept
 {
     vector<PACKET_BYTE> packet;
     int32_t use_channel=-1;
@@ -1067,252 +1118,232 @@ void send_loop()
             continue;
         }
 
-        // Sleep just a bit to let other threads act
-        COSMOS_SLEEP(.001);
-
-        for (uint8_t local_node=1; local_node<txq.size(); ++local_node)
+        for (uint8_t node_id=1; node_id<txq.size(); ++node_id)
         {
             // See if we have an active channel serving this Node
-            int32_t channel = check_channel(local_node);
-            if (channel < 0)
+            if ((use_channel=check_channel(node_id)) <= 0)
             {
                 continue;
             }
 
+//            printf("use_channel: %d/%d\n", use_channel, out_comm_channel.size());
+
+            // Sleep just a bit to let other threads act
+//            COSMOS_SLEEP(out_comm_channel[use_channel].packet_size / out_comm_channel[use_channel].throughput);
+            COSMOS_SLEEP(.1);
+
             // Set up to do the most important things first
-            txq[(local_node)].outgoing.activity = false;
-            txq[(local_node)].incoming.activity = false;
+            txq[(node_id)].outgoing.activity = false;
+            txq[(node_id)].incoming.activity = false;
 
-            // Initialize timer to check minimum wait time
-            if (queuecheck(static_cast <PACKET_NODE_ID_TYPE>(local_node)) >= 5.)
+            // Let queue drain if necessary
+            if (queuecheck(static_cast <PACKET_NODE_ID_TYPE>(node_id)) >= 2.)
             {
-                COSMOS_SLEEP(queuecheck(static_cast <PACKET_NODE_ID_TYPE>(local_node)) - 5.);
+//                COSMOS_SLEEP(queuecheck(static_cast <PACKET_NODE_ID_TYPE>(node_id)) - 5.);
+                continue;
             }
 
-            // Send Cancel, Complete, Data, Reqdata, Metadata only if we have learned what the remote node mapping is
-            if (txq[local_node].remote_id > 0)
+            // Send Heartbeat every 10 seconds, regardless
+            if (txq[(node_id)].outgoing.heartbeatclock < currentmjd())
             {
-                // Send any  pending Metadata packets
-                outgoing_tx_lock.lock();
-                if (queuecheck(static_cast <PACKET_NODE_ID_TYPE>(local_node)) < 5.)
-                {
-                    txq[(local_node)].outgoing.metaclock = currentmjd();
-                    for (uint16_t tx_id=1; tx_id<PROGRESS_QUEUE_SIZE; ++tx_id)
-                    {
-                        if (txq[(local_node)].outgoing.progress[tx_id].tx_id == tx_id && txq[(local_node)].outgoing.progress[tx_id].sendmeta)
-                        {
-                            tx_progress tx = txq[(local_node)].outgoing.progress[tx_id];
-                            vector<PACKET_BYTE> packet;
-                            make_metadata_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(local_node), tx.tx_id, (char *)tx.file_name.c_str(), tx.file_size, (char *)tx.agent_name.c_str());
-                            use_channel = queuesendto(static_cast <PACKET_NODE_ID_TYPE>(local_node), "Outgoing", packet);
-                            if (use_channel >= 0)
-                            {
-                                txq[(local_node)].outgoing.activity = true;
-                                txq[(local_node)].outgoing.progress[tx_id].sendmeta = false;
-                                txq[(local_node)].outgoing.progress[tx_id].havemeta = true;
-                                txq[(local_node)].outgoing.progress[tx_id].sentmeta = true;
-                                txq[(local_node)].outgoing.metaclock += out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                                txq[(local_node)].outgoing.queueclock = txq[(local_node)].outgoing.metaclock + out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                                txq[(local_node)].outgoing.heartbeatclock = currentmjd() + 4. / 86400.;
-                                break;
-                            }
-                        }
-                    }
-                }
-                outgoing_tx_lock.unlock();
-
-                // Send Data packets if we have data to send and we didn't do anything above
-                outgoing_tx_lock.lock();
-                if (queuecheck(static_cast <PACKET_NODE_ID_TYPE>(local_node)) < 5.)
-                {
-                    txq[(local_node)].outgoing.dataclock = currentmjd();
-                    uint16_t tx_id = choose_outgoing_tx_id((local_node));
-                    if (txq[(local_node)].outgoing.progress[tx_id].tx_id == tx_id && txq[(local_node)].outgoing.progress[tx_id].senddata)
-                    {
-                        if (txq[(local_node)].outgoing.progress[tx_id].file_size)
-                        {
-                            // Check if there is any more data to send
-                            if (txq[(local_node)].outgoing.progress[tx_id].total_bytes == 0)
-                            {
-                                txq[(local_node)].outgoing.progress[tx_id].sentdata = true;
-                                txq[(local_node)].outgoing.progress[tx_id].senddata = false;
-                            }
-                            else
-                            {
-                                // Attempt to open the outgoing progress file
-                                if (txq[(local_node)].outgoing.progress[tx_id].fp == nullptr)
-                                {
-                                    txq[(local_node)].outgoing.progress[tx_id].fp = fopen(txq[(local_node)].outgoing.progress[tx_id].filepath.c_str(), "r");
-                                }
-
-                                // If we're good, continue with the process
-                                if(txq[(local_node)].outgoing.progress[tx_id].fp != nullptr)
-                                {
-                                    file_progress tp;
-                                    tp = txq[(local_node)].outgoing.progress[tx_id].file_info[0];
-
-                                    PACKET_FILE_SIZE_TYPE byte_count = (tp.chunk_end - tp.chunk_start) + 1;
-                                    if (byte_count > out_comm_channel[use_channel].packet_size)
-                                    {
-                                        byte_count = out_comm_channel[use_channel].packet_size;
-                                    }
-
-                                    tp.chunk_end = tp.chunk_start + byte_count - 1;
-
-                                    // Read the packet and send it
-                                    int32_t nbytes;
-                                    PACKET_BYTE* chunk = new PACKET_BYTE[byte_count]();
-                                    if (!(nbytes = fseek(txq[(local_node)].outgoing.progress[tx_id].fp, tp.chunk_start, SEEK_SET)))
-                                    {
-                                        nbytes = fread(chunk, 1, byte_count, txq[(local_node)].outgoing.progress[tx_id].fp);
-                                    }
-                                    if (nbytes == byte_count)
-                                    {
-                                        make_data_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(local_node), txq[(local_node)].outgoing.progress[tx_id].tx_id, byte_count, tp.chunk_start, chunk);
-                                        use_channel = queuesendto(static_cast <PACKET_NODE_ID_TYPE>(local_node), "Outgoing", packet);
-                                        if (use_channel >= 0)
-                                        {
-                                            txq[(local_node)].outgoing.progress[tx_id].file_info[0].chunk_start = tp.chunk_end + 1;
-                                            txq[(local_node)].outgoing.activity = true;
-                                            txq[(local_node)].outgoing.dataclock += out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                                            txq[(local_node)].outgoing.metaclock = txq[(local_node)].outgoing.dataclock + out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                                            txq[(local_node)].outgoing.queueclock = txq[(local_node)].outgoing.metaclock + out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                                            txq[(local_node)].outgoing.heartbeatclock = currentmjd() + 4. / 86400.;
-                                        }
-                                    }
-                                    else
-                                    {
-                                        // Some problem with this transmission, ask other end to dequeue it
-                                        // Remove transaction
-                                        txq[(local_node)].outgoing.progress[tx_id].senddata = false;
-                                        txq[(local_node)].outgoing.progress[tx_id].complete = true;
-                                    }
-                                    delete[] chunk;
-
-                                    if (txq[(local_node)].outgoing.progress[tx_id].file_info[0].chunk_start > txq[(local_node)].outgoing.progress[tx_id].file_info[0].chunk_end)
-                                    {
-                                        // All done with this file_info entry. Close file and remove entry.
-                                        fclose(txq[(local_node)].outgoing.progress[tx_id].fp);
-                                        txq[(local_node)].outgoing.progress[tx_id].fp = nullptr;
-                                        txq[(local_node)].outgoing.progress[tx_id].file_info.pop_front();
-                                    }
-
-                                    write_meta(txq[(local_node)].outgoing.progress[tx_id]);
-                                }
-                                else
-                                {
-                                    // Some problem with this transmission, ask other end to dequeue it
-
-                                    txq[(local_node)].outgoing.progress[tx_id].senddata = false;
-                                    txq[(local_node)].outgoing.progress[tx_id].complete = true;
-                                }
-                            }
-                        }
-                        // Zero length file, ask other end to dequeue it
-                        else
-                        {
-                            txq[(local_node)].outgoing.progress[tx_id].senddata = false;
-                            txq[(local_node)].outgoing.progress[tx_id].complete = true;
-                        }
-                    }
-                }
-                outgoing_tx_lock.unlock();
-
-                // Send Cancel packets if required
-                outgoing_tx_lock.lock();
-                if (queuecheck(static_cast <PACKET_NODE_ID_TYPE>(local_node)) < 5.)
-                {
-                    txq[(local_node)].outgoing.completeclock = currentmjd();
-                    for (uint16_t tx_id=1; tx_id<PROGRESS_QUEUE_SIZE; ++tx_id)
-                    {
-                        if (txq[(local_node)].outgoing.progress[tx_id].tx_id == tx_id && txq[(local_node)].outgoing.progress[tx_id].complete)
-                        {
-                            // Remove from queue
-                            outgoing_tx_del(local_node, tx_id);
-
-                            // Send a CANCEL packet
-                            vector<PACKET_BYTE> packet;
-                            make_cancel_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(local_node), tx_id);
-                            use_channel = queuesendto(static_cast <PACKET_NODE_ID_TYPE>(local_node), "Outgoing", packet);
-                            if (use_channel >= 0)
-                            {
-                                txq[(local_node)].outgoing.activity = true;
-                                txq[(local_node)].outgoing.completeclock += out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                                txq[(local_node)].outgoing.dataclock = txq[(local_node)].outgoing.completeclock + out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                                txq[(local_node)].outgoing.metaclock = txq[(local_node)].outgoing.dataclock + out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                                txq[(local_node)].outgoing.queueclock = txq[(local_node)].outgoing.metaclock + out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                                txq[(local_node)].outgoing.heartbeatclock = currentmjd() + 4. / 86400.;
-                            }
-                        }
-                    }
-                }
-                outgoing_tx_lock.unlock();
-
-                // Send Complete packets if required
-                incoming_tx_lock.lock();
-                if (queuecheck(static_cast <PACKET_NODE_ID_TYPE>(local_node)) < 5.)
-                    for (uint16_t tx_id=1; tx_id<PROGRESS_QUEUE_SIZE; ++tx_id)
-                    {
-                        if (txq[(local_node)].incoming.progress[tx_id].tx_id == tx_id && txq[(local_node)].incoming.progress[tx_id].complete)
-                        {
-                            // Remove from queue
-                            incoming_tx_del(local_node, tx_id);
-
-                            // Send a COMPLETE packet
-                            vector<PACKET_BYTE> packet;
-                            make_complete_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(local_node), tx_id);
-                            use_channel = queuesendto(static_cast <PACKET_NODE_ID_TYPE>(local_node), "Incoming", packet);
-                            if (use_channel >= 0)
-                            {
-                                txq[(local_node)].incoming.activity = true;
-                                txq[(local_node)].incoming.completeclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                                txq[(local_node)].incoming.dataclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                                txq[(local_node)].incoming.metaclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                                txq[(local_node)].incoming.queueclock = currentmjd() + 10. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                            }
-                        }
-                    }
-                incoming_tx_lock.unlock();
-
-                // Send Reqdata packet if there is still data to be gotten and it has been otherwise quiet
-                incoming_tx_lock.lock();
-                if (queuecheck(static_cast <PACKET_NODE_ID_TYPE>(local_node)) < 5.)
-                {
-                    PACKET_TX_ID_TYPE tx_id = check_tx_id(txq[(local_node)].incoming, choose_incoming_tx_id(local_node));
-
-                    if (tx_id < PROGRESS_QUEUE_SIZE && tx_id > 0)
-                    {
-                        // Ask for missing data
-                        vector<file_progress> missing;
-                        missing = find_chunks_missing(txq[(local_node)].incoming.progress[tx_id]);
-                        for (uint32_t j=0; j<missing.size(); ++j)
-                        {
-                            vector<PACKET_BYTE> packet;
-                            make_reqdata_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(local_node), txq[(local_node)].incoming.progress[tx_id].tx_id, missing[j].chunk_start, missing[j].chunk_end);
-                            use_channel = queuesendto(static_cast <PACKET_NODE_ID_TYPE>(local_node), "Incoming", packet);
-                            out_comm_channel[channel].send_reqdata = false;
-                            txq[(local_node)].incoming.dataclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                            txq[(local_node)].incoming.metaclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                            txq[(local_node)].incoming.queueclock = currentmjd() + 10. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                        }
-                    }
-                }
-                incoming_tx_lock.unlock();
+                uint32_t funixtime = utc2unixseconds(out_comm_channel[use_channel].fmjd);
+                make_heartbeat_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(node_id), txq[(node_id)].node_name, 4, out_comm_channel[use_channel].throughput, funixtime);
+                queuesendto(static_cast <PACKET_NODE_ID_TYPE>(node_id), "Outgoing", packet);
+                txq[(node_id)].outgoing.heartbeatclock = currentmjd() + 10. / 86400.;
             }
 
-            // Send Reqmeta packet if requested
-            incoming_tx_lock.lock();
-            if (queuecheck(static_cast <PACKET_NODE_ID_TYPE>(local_node)) < 5.)
+            // Send Queue packet, if anything needs to be queued
+            outgoing_tx_lock.lock();
+            if (txq[(node_id)].outgoing.sendqueue && !txq[(node_id)].outgoing.sentqueue)
             {
                 vector<PACKET_TX_ID_TYPE> tqueue (TRANSFER_QUEUE_LIMIT, 0);
                 PACKET_TX_ID_TYPE iq = 0;
                 for (uint16_t tx_id=1; tx_id<PROGRESS_QUEUE_SIZE; ++tx_id)
                 {
-                    if (txq[(local_node)].incoming.progress[tx_id].tx_id && txq[(local_node)].incoming.progress[tx_id].sendmeta)
+                    if (txq[(node_id)].outgoing.progress[tx_id].tx_id == tx_id)
                     {
-                        next_reqmeta_time += sizeof(packet_struct_metashort) / (86400. * out_comm_channel[use_channel].throughput);
+                        tqueue[iq++] = txq[(node_id)].outgoing.progress[tx_id].tx_id;
+//                        txq[(node_id)].outgoing.progress[tx_id].sendmeta = true;
+                    }
+                    if (iq == TRANSFER_QUEUE_LIMIT)
+                    {
+                        break;
+                    }
+                }
+                if (iq)
+                {
+                    make_queue_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(node_id), txq[(node_id)].node_name, tqueue);
+                    use_channel = queuesendto(static_cast <PACKET_NODE_ID_TYPE>(node_id), "Outgoing", packet);
+                    if (use_channel >= 0)
+                    {
+                        txq[(node_id)].outgoing.sendqueue = false;
+                        txq[(node_id)].outgoing.sentqueue = true;
+                        txq[(node_id)].outgoing.activity = true;
+                    }
+                }
+            }
+            outgoing_tx_lock.unlock();
+
+            profile_check(__LINE__, 2);
+
+            // Send any  pending Metadata packets
+            outgoing_tx_lock.lock();
+            if (txq[(node_id)].outgoing.sentqueue)
+            {
+                for (uint16_t tx_id=1; tx_id<PROGRESS_QUEUE_SIZE; ++tx_id)
+                {
+                    if (txq[(node_id)].outgoing.progress[tx_id].tx_id == tx_id && txq[(node_id)].outgoing.progress[tx_id].sendmeta && !txq[(node_id)].outgoing.progress[tx_id].sentmeta)
+                    {
+                        tx_progress tx = txq[(node_id)].outgoing.progress[tx_id];
+                        vector<PACKET_BYTE> packet;
+                        make_metadata_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(node_id), tx.tx_id, (char *)tx.file_name.c_str(), tx.file_size, (char *)tx.agent_name.c_str());
+                        use_channel = queuesendto(static_cast <PACKET_NODE_ID_TYPE>(node_id), "Outgoing", packet);
+                        if (use_channel >= 0)
+                        {
+                            txq[(node_id)].outgoing.activity = true;
+                            txq[(node_id)].outgoing.progress[tx_id].sendmeta = false;
+                            txq[(node_id)].outgoing.progress[tx_id].havemeta = true;
+                            txq[(node_id)].outgoing.progress[tx_id].sentmeta = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            outgoing_tx_lock.unlock();
+
+            profile_check(__LINE__, 2);
+
+            // Send Data packets if we have data to send and we didn't do anything above
+            outgoing_tx_lock.lock();
+            if (txq[(node_id)].outgoing.sentqueue)
+            {
+                uint16_t tx_id = choose_outgoing_tx_id((node_id));
+                if (txq[(node_id)].outgoing.progress[tx_id].tx_id == tx_id && txq[(node_id)].outgoing.progress[tx_id].sentmeta && txq[(node_id)].outgoing.progress[tx_id].senddata)
+                {
+                    if (txq[(node_id)].outgoing.progress[tx_id].file_size)
+                    {
+                        // Check if there is any more data to send
+                        if (txq[(node_id)].outgoing.progress[tx_id].total_bytes == 0)
+                        {
+                            txq[(node_id)].outgoing.progress[tx_id].sentdata = true;
+                            txq[(node_id)].outgoing.progress[tx_id].senddata = false;
+                        }
+                        else
+                        {
+                            // Attempt to open the outgoing progress file
+                            if (txq[(node_id)].outgoing.progress[tx_id].fp == nullptr)
+                            {
+                                txq[(node_id)].outgoing.progress[tx_id].fp = fopen(txq[(node_id)].outgoing.progress[tx_id].filepath.c_str(), "r");
+                            }
+
+                            // If we're good, continue with the process
+                            if(txq[(node_id)].outgoing.progress[tx_id].fp != nullptr)
+                            {
+                                file_progress tp;
+                                tp = txq[(node_id)].outgoing.progress[tx_id].file_info[0];
+
+                                PACKET_FILE_SIZE_TYPE byte_count = (tp.chunk_end - tp.chunk_start) + 1;
+                                if (byte_count > out_comm_channel[use_channel].packet_size)
+                                {
+                                    byte_count = out_comm_channel[use_channel].packet_size;
+                                }
+
+                                tp.chunk_end = tp.chunk_start + byte_count - 1;
+
+                                // Read the packet and send it
+                                int32_t nbytes;
+                                PACKET_BYTE* chunk = new PACKET_BYTE[byte_count]();
+                                if (!(nbytes = fseek(txq[(node_id)].outgoing.progress[tx_id].fp, tp.chunk_start, SEEK_SET)))
+                                {
+                                    nbytes = fread(chunk, 1, byte_count, txq[(node_id)].outgoing.progress[tx_id].fp);
+                                }
+                                if (nbytes == byte_count)
+                                {
+                                    make_data_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(node_id), txq[(node_id)].outgoing.progress[tx_id].tx_id, byte_count, tp.chunk_start, chunk);
+                                    use_channel = queuesendto(static_cast <PACKET_NODE_ID_TYPE>(node_id), "Outgoing", packet);
+                                    if (use_channel >= 0)
+                                    {
+                                        txq[(node_id)].outgoing.progress[tx_id].file_info[0].chunk_start = tp.chunk_end + 1;
+                                        txq[(node_id)].outgoing.activity = true;
+                                    }
+                                }
+                                else
+                                {
+                                    // Some problem with this transmission, ask other end to dequeue it
+                                    // Remove transaction
+                                    txq[(node_id)].outgoing.progress[tx_id].senddata = false;
+                                    txq[(node_id)].outgoing.progress[tx_id].sentdata = true;
+                                    txq[(node_id)].outgoing.progress[tx_id].complete = true;
+                                }
+                                delete[] chunk;
+
+                                if (txq[(node_id)].outgoing.progress[tx_id].file_info[0].chunk_start > txq[(node_id)].outgoing.progress[tx_id].file_info[0].chunk_end)
+                                {
+                                    // All done with this file_info entry. Close file and remove entry.
+                                    fclose(txq[(node_id)].outgoing.progress[tx_id].fp);
+                                    txq[(node_id)].outgoing.progress[tx_id].fp = nullptr;
+                                    txq[(node_id)].outgoing.progress[tx_id].file_info.pop_front();
+                                }
+
+                                write_meta(txq[(node_id)].outgoing.progress[tx_id]);
+                            }
+                            else
+                            {
+                                // Some problem with this transmission, ask other end to dequeue it
+
+                                txq[(node_id)].outgoing.progress[tx_id].senddata = false;
+                                txq[(node_id)].outgoing.progress[tx_id].sentdata = true;
+                                txq[(node_id)].outgoing.progress[tx_id].complete = true;
+                            }
+                        }
+                    }
+                    // Zero length file, ask other end to dequeue it
+                    else
+                    {
+                        txq[(node_id)].outgoing.progress[tx_id].senddata = false;
+                        txq[(node_id)].outgoing.progress[tx_id].sentdata = true;
+                        txq[(node_id)].outgoing.progress[tx_id].complete = true;
+                    }
+                }
+            }
+            outgoing_tx_lock.unlock();
+
+            // Send Cancel packets if required
+            outgoing_tx_lock.lock();
+            if (txq[(node_id)].outgoing.sentqueue)
+            {
+                for (uint16_t tx_id=1; tx_id<PROGRESS_QUEUE_SIZE; ++tx_id)
+                {
+                    if (txq[(node_id)].outgoing.progress[tx_id].tx_id == tx_id && txq[(node_id)].outgoing.progress[tx_id].complete)
+                    {
+                        // Remove from queue
+                        outgoing_tx_del(node_id, tx_id);
+
+                        // Send a CANCEL packet
+                        vector<PACKET_BYTE> packet;
+                        make_cancel_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(node_id), tx_id);
+                        use_channel = queuesendto(static_cast <PACKET_NODE_ID_TYPE>(node_id), "Outgoing", packet);
+                        if (use_channel >= 0)
+                        {
+                            txq[(node_id)].outgoing.activity = true;
+                        }
+                    }
+                }
+            }
+            outgoing_tx_lock.unlock();
+
+            // Send Reqmeta packet if needed and it has been otherwise quiet
+            incoming_tx_lock.lock();
+            if (!txq[(node_id)].incoming.rcvdqueue && !txq[(node_id)].incoming.rcvdmeta && txq[(node_id)].incoming.reqmetaclock < currentmjd())
+            {
+                vector<PACKET_TX_ID_TYPE> tqueue (TRANSFER_QUEUE_LIMIT, 0);
+                PACKET_TX_ID_TYPE iq = 0;
+                for (uint16_t tx_id=1; tx_id<PROGRESS_QUEUE_SIZE; ++tx_id)
+                {
+                    if (txq[(node_id)].incoming.progress[tx_id].tx_id && !txq[(node_id)].incoming.progress[tx_id].sentmeta)
+                    {
                         tqueue[iq++] = tx_id;
-                        txq[(local_node)].incoming.progress[tx_id].sendmeta = false;
+                        txq[(node_id)].incoming.progress[tx_id].sendmeta = true;
                     }
                     if (iq == TRANSFER_QUEUE_LIMIT)
                     {
@@ -1322,79 +1353,66 @@ void send_loop()
                 if (iq)
                 {
                     vector<PACKET_BYTE> packet;
-                    make_reqmeta_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(local_node), txq[(local_node)].node_name, tqueue);
-                    use_channel = queuesendto(static_cast <PACKET_NODE_ID_TYPE>(local_node), "Incoming", packet);
-                    if (use_channel >= 0)
+                    make_reqmeta_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(node_id), txq[(node_id)].node_name, tqueue);
+                    use_channel = queuesendto(static_cast <PACKET_NODE_ID_TYPE>(node_id), "Incoming", packet);
+                }
+                txq[(node_id)].incoming.reqmetaclock = currentmjd() + 5. / 86400.;
+            }
+            incoming_tx_lock.unlock();
+
+            // Send Reqdata packet if there is still data to be gotten and it has been otherwise quiet
+            incoming_tx_lock.lock();
+            if (!txq[(node_id)].incoming.rcvdqueue && !txq[(node_id)].incoming.rcvdmeta && !txq[(node_id)].incoming.rcvddata && txq[(node_id)].incoming.reqdataclock < currentmjd())
+            {
+                for (uint16_t tx_id=1; tx_id<PROGRESS_QUEUE_SIZE; ++tx_id)
+                {
+                    if (txq[(node_id)].incoming.progress[tx_id].tx_id)
                     {
-                        txq[(local_node)].incoming.metaclock = currentmjd() + 2. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                        txq[(local_node)].incoming.queueclock = currentmjd() + 10. * out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
+                        // Ask for missing data
+                        vector<file_progress> missing;
+                        missing = find_chunks_missing(txq[(node_id)].incoming.progress[tx_id]);
+                        for (uint32_t j=0; j<missing.size(); ++j)
+                        {
+                            vector<PACKET_BYTE> packet;
+                            make_reqdata_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(node_id), txq[(node_id)].incoming.progress[tx_id].tx_id, missing[j].chunk_start, missing[j].chunk_end);
+                            use_channel = queuesendto(static_cast <PACKET_NODE_ID_TYPE>(node_id), "Incoming", packet);
+                        }
+                    }
+                }
+                txq[(node_id)].incoming.reqdataclock = currentmjd() + 5. / 86400.;
+            }
+            incoming_tx_lock.unlock();
+
+            // Send Complete packets if required
+            incoming_tx_lock.lock();
+            if (!txq[(node_id)].incoming.rcvdqueue && !txq[(node_id)].incoming.rcvdmeta && !txq[(node_id)].incoming.rcvddata)
+            {
+                for (uint16_t tx_id=1; tx_id<PROGRESS_QUEUE_SIZE; ++tx_id)
+                {
+                    if (txq[(node_id)].incoming.progress[tx_id].tx_id == tx_id && txq[node_id].incoming.progress[tx_id].file_size == txq[node_id].incoming.progress[tx_id].total_bytes)
+                    {
+                        // Remove from queue
+                        txq[(node_id)].incoming.progress[tx_id].complete = true;
+                        incoming_tx_del(node_id, tx_id);
+
+                        // Send a COMPLETE packet
+                        vector<PACKET_BYTE> packet;
+                        make_complete_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(node_id), tx_id);
+                        use_channel = queuesendto(static_cast <PACKET_NODE_ID_TYPE>(node_id), "Incoming", packet);
+                        if (use_channel >= 0)
+                        {
+                            txq[(node_id)].incoming.activity = true;
+                        }
                     }
                 }
             }
             incoming_tx_lock.unlock();
 
-            // Send Queue packet, if anything needs to be queued
-            outgoing_tx_lock.lock();
-            if (queuecheck(static_cast <PACKET_NODE_ID_TYPE>(local_node)) < 5.)
-            {
-                txq[(local_node)].outgoing.queueclock = currentmjd();
-                vector<PACKET_TX_ID_TYPE> tqueue (TRANSFER_QUEUE_LIMIT, 0);
-                PACKET_TX_ID_TYPE iq = 0;
-                for (uint16_t tx_id=1; tx_id<PROGRESS_QUEUE_SIZE; ++tx_id)
-                {
-                    if (txq[(local_node)].outgoing.progress[tx_id].tx_id == tx_id)
-                    {
-                        tqueue[iq++] = txq[(local_node)].outgoing.progress[tx_id].tx_id;
-//                        txq[(local_node)].outgoing.progress[tx_id].sendmeta = true;
-                    }
-                    if (iq == TRANSFER_QUEUE_LIMIT)
-                    {
-                        break;
-                    }
-                }
-                if (iq)
-                {
-                    make_queue_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(local_node), txq[(local_node)].node_name, tqueue);
-                    use_channel = queuesendto(static_cast <PACKET_NODE_ID_TYPE>(local_node), "Outgoing", packet);
-                    if (use_channel >= 0)
-                    {
-                        txq[(local_node)].outgoing.activity = true;
-                        out_comm_channel[channel].send_queue = false;
-                        txq[(local_node)].outgoing.queueclock += out_comm_channel[use_channel].packet_size / (86400. * out_comm_channel[use_channel].throughput);
-                    }
-                }
-            }
-            outgoing_tx_lock.unlock();
-
-            // Send Reqqueue packet if requested
-//            incoming_tx_lock.lock();
-//            if (txq[(local_node)].incoming.queueclock < currentmjd())
-//            if (queuecheck(static_cast <PACKET_NODE_ID_TYPE>(local_node)) < 5. && txq[(local_node)].incoming.queueclock < currentmjd())
-//            {
-//                make_reqqueue_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(local_node), txq[(local_node)].node_name);
-//                use_channel = queuesendto(static_cast <PACKET_NODE_ID_TYPE>(local_node), "Incoming", packet);
-//                if (use_channel >= 0)
-//                {
-//                    txq[(local_node)].incoming.activity = true;
-//                    txq[(local_node)].incoming.queueclock = currentmjd() + 5. / 86400.;
-//                }
-//            }
-//            incoming_tx_lock.unlock();
-
-            // Send Heartbeat every 4 seconds, regardless
-//            if (txq[(local_node)].outgoing.heartbeatclock < currentmjd())
-            if (queuecheck(static_cast <PACKET_NODE_ID_TYPE>(local_node)) < 5. && txq[(local_node)].outgoing.heartbeatclock < currentmjd())
-            {
-                uint32_t funixtime = utc2unixseconds(out_comm_channel[channel].fmjd);
-                make_heartbeat_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(local_node), txq[(local_node)].node_name, 4, out_comm_channel[channel].throughput, funixtime);
-                use_channel = queuesendto(static_cast <PACKET_NODE_ID_TYPE>(local_node), "Outgoing", packet);
-                txq[(local_node)].outgoing.heartbeatclock = currentmjd() + 5. / 86400.;
-            }
         }
     }
 }
 
-void transmit_loop()
+void transmit_loop() noexcept
 {
     int32_t iretn;
     //    std::mutex transmit_queue_lock;
@@ -1414,6 +1432,7 @@ void transmit_loop()
         while (!transmit_queue.empty())
         {
             // Get next packet from transceiver FIFO
+            txqueue_lock.lock();
             transmit_queue_entry entry = transmit_queue.front();
             iretn = mysendto(entry.type, entry.channel, entry.packet);
             if (iretn >= 0)
@@ -1421,6 +1440,7 @@ void transmit_loop()
                 out_comm_channel[entry.channel].fmjd = transmit_queue.back().nmjd;
                 transmit_queue.pop();
             }
+            txqueue_lock.unlock();
         }
         COSMOS_SLEEP(.001);
     }
@@ -1431,6 +1451,8 @@ double queuecheck(PACKET_NODE_ID_TYPE node_id)
     int32_t use_channel;
 
     use_channel = -1;
+    profile_check(__LINE__, 2);
+
     for (uint16_t i=0; i<out_comm_channel.size(); ++i)
     {
         if (txq[node_id].node_name == out_comm_channel[i].node)
@@ -1453,17 +1475,19 @@ int32_t queuesendto(PACKET_NODE_ID_TYPE node_id, string type, vector<PACKET_BYTE
     transmit_queue_entry tentry;
     int32_t use_channel;
 
-    use_channel = -1;
-    for (uint16_t i=0; i<out_comm_channel.size(); ++i)
-    {
-        if (txq[node_id].node_name == out_comm_channel[i].node)
-        {
-            use_channel = i;
-            break;
-        }
-    }
+//    use_channel = -1;
+//    for (uint16_t i=0; i<out_comm_channel.size(); ++i)
+//    {
+//        if (txq[node_id].node_name == out_comm_channel[i].node)
+//        {
+//            use_channel = i;
+//            break;
+//        }
+//    }
 
-    if (use_channel > out_comm_channel.size())
+//    if (use_channel > out_comm_channel.size())
+    use_channel = check_channel(node_id);
+    if (use_channel <= 0)
     {
         return -1.;
     }
@@ -1472,6 +1496,7 @@ int32_t queuesendto(PACKET_NODE_ID_TYPE node_id, string type, vector<PACKET_BYTE
     tentry.channel = use_channel;
     tentry.packet = packet;
     tentry.time_step = (28 + packet.size()) / (86400. * out_comm_channel[use_channel].throughput);
+    txqueue_lock.lock();
     if (transmit_queue.empty())
     {
         tentry.nmjd = out_comm_channel[use_channel].nmjd + tentry.time_step;
@@ -1481,6 +1506,7 @@ int32_t queuesendto(PACKET_NODE_ID_TYPE node_id, string type, vector<PACKET_BYTE
         tentry.nmjd = transmit_queue.back().nmjd + tentry.time_step;
     }
     transmit_queue.push(tentry);
+    txqueue_lock.unlock();
     //    transmit_queue_check.notify_one();
     // Sleep just a bit to give other threads a chance
     COSMOS_SLEEP(.001);
@@ -1492,15 +1518,21 @@ int32_t mysendto(string type, int32_t use_channel, vector<PACKET_BYTE>& buf)
     int32_t iretn;
     double cmjd;
 
+    profile_check(__LINE__, 3);
+
     if ((cmjd = currentmjd(0.)) < out_comm_channel[use_channel].nmjd)
     {
         COSMOS_SLEEP((86400. * (out_comm_channel[use_channel].nmjd - cmjd)));
     }
 
+    profile_check(__LINE__, 3);
+
     iretn = sendto(out_comm_channel[use_channel].chansock.cudp, reinterpret_cast<const char*>(&buf[0]), buf.size(), 0, reinterpret_cast<sockaddr*>(&out_comm_channel[use_channel].chansock.caddr), sizeof(struct sockaddr_in));
 
     if (iretn >= 0)
     {
+        profile_check(__LINE__, 3);
+
         ++packet_out_count;
         out_comm_channel[use_channel].lomjd = currentmjd();
         out_comm_channel[use_channel].nmjd = out_comm_channel[use_channel].lomjd + ((28+iretn) / (float)out_comm_channel[use_channel].throughput)/86400.;
@@ -1515,6 +1547,8 @@ int32_t mysendto(string type, int32_t use_channel, vector<PACKET_BYTE>& buf)
         ++send_error_count;
     }
 
+    profile_check(__LINE__, 3);
+
     return iretn;
 }
 
@@ -1526,11 +1560,15 @@ int32_t myrecvfrom(string type, socket_channel &channel, vector<PACKET_BYTE>& bu
     ElapsedTime et;
     do
     {
+        profile_check(__LINE__, 1);
+
         fd_set set;
         FD_ZERO(&set);
         int fdmax = -1;
         for (uint16_t i=0; i<out_comm_channel.size(); ++i)
         {
+            profile_check(__LINE__, 1);
+
             FD_SET(out_comm_channel[i].chansock.cudp, &set);
             if (out_comm_channel[i].chansock.cudp > fdmax)
             {
@@ -1541,10 +1579,16 @@ int32_t myrecvfrom(string type, socket_channel &channel, vector<PACKET_BYTE>& bu
         if (rtimeout >= 0.)
         {
 #if !defined(COSMOS_WIN_OS)
+            profile_check(__LINE__, 1);
+
             timeval timeout;
             timeout.tv_sec = static_cast<int32_t>(rtimeout);
             timeout.tv_usec = static_cast<int32_t>(1000000. * (rtimeout - timeout.tv_sec));
+            profile_check(__LINE__, 1);
+
             int rv = select(fdmax+1, &set, nullptr, nullptr, &timeout);
+            profile_check(__LINE__, 1);
+
             if (rv == -1)
             {
                 nbytes = -errno;
@@ -1556,14 +1600,20 @@ int32_t myrecvfrom(string type, socket_channel &channel, vector<PACKET_BYTE>& bu
             }
             else
             {
+                profile_check(__LINE__, 1);
+
                 for (uint16_t i=0; i<out_comm_channel.size(); ++i)
                 {
                     if (FD_ISSET(out_comm_channel[i].chansock.cudp, &set))
                     {
+                        profile_check(__LINE__, 1);
+
                         channel = out_comm_channel[i].chansock;
                         nbytes = recvfrom(channel.cudp, reinterpret_cast<char *>(&buf[0]), length, 0, reinterpret_cast<sockaddr*>(&channel.caddr), reinterpret_cast<socklen_t *>(&channel.addrlen));
                         if (nbytes > 0)
                         {
+                            profile_check(__LINE__, 1);
+
                             uint16_t crccalc = calc_crc16ccitt(&buf[3], nbytes-3);
                             uint16_t crc;
                             memmove(&crc, &buf[0]+PACKET_HEADER_OFFSET_CRC, sizeof(PACKET_CRC));
@@ -1585,6 +1635,8 @@ int32_t myrecvfrom(string type, socket_channel &channel, vector<PACKET_BYTE>& bu
                         }
                         else
                         {
+                            profile_check(__LINE__, 1);
+
                             if (nbytes < 0)
                             {
                                 nbytes = -errno;
@@ -1656,99 +1708,58 @@ void debug_packet(vector<PACKET_BYTE> buf, uint8_t direction, string type, int32
     {
         debug_fd_lock.lock();
 
-        string node_name = "";
-        uint8_t local_node = 0;
-        uint8_t remote_node = 0;
+        string packet_node_name;
+        string node_name = lookup_node_id_name(buf[PACKET_HEADER_OFFSET_NODE_ID]);
+        uint8_t node_id = check_node_id(buf[PACKET_HEADER_OFFSET_NODE_ID]);
+        switch (buf[0] & 0x0f)
+        {
+        case PACKET_HEARTBEAT:
+        case PACKET_REQQUEUE:
+        case PACKET_QUEUE:
+        case PACKET_REQMETA:
+            packet_node_name = reinterpret_cast<char *>(&buf[PACKET_HEADER_OFFSET_NODE_NAME]);
+            break;
+        case PACKET_METADATA:
+        case PACKET_REQDATA:
+        case PACKET_DATA:
+        case PACKET_COMPLETE:
+        case PACKET_CANCEL:
+            break;
+        }
         if (direction == PACKET_IN)
         {
-            remote_node = buf[PACKET_HEADER_OFFSET_NODE_ID];
-            switch (buf[0] & 0x0f)
-            {
-            case PACKET_HEARTBEAT:
-            case PACKET_REQQUEUE:
-            case PACKET_QUEUE:
-            case PACKET_REQMETA:
-                node_name = reinterpret_cast<char *>(&buf[PACKET_HEADER_OFFSET_NODE_NAME]);
-                local_node = lookup_local_node_id(node_name);
-                if (local_node == 0)
-                {
-                    local_node = add_node_name(node_name);
-                }
-                txq[local_node].remote_id = remote_node;
-                break;
-            case PACKET_METADATA:
-            case PACKET_REQDATA:
-            case PACKET_DATA:
-            case PACKET_COMPLETE:
-            case PACKET_CANCEL:
-                local_node = lookup_local_node_id(remote_node);
-                if (local_node > 0)
-                {
-                    node_name = txq[local_node].node_name;
-                }
-                break;
-            }
-
             if (out_comm_channel[use_channel].node.empty())
             {
                 if (!node_name.empty())
                 {
-                    fprintf(agent->get_debug_fd(), "%16.10f %.4f RECV L %u R %u %s %s [%s] In: %u Out: %u Size: %u ", currentmjd(), dt.lap(), local_node, remote_node, node_name.c_str(), out_comm_channel[use_channel].chanip.c_str(), type.c_str(), packet_in_count, packet_out_count, buf.size());
+                    fprintf(agent->get_debug_fd(), "%.4f %.4f RECV L %u R %u %s %s [%s] In: %u Out: %u Size: %u ", tet.split(), dt.lap(), node_id, node_id, node_name.c_str(), out_comm_channel[use_channel].chanip.c_str(), type.c_str(), packet_in_count, packet_out_count, buf.size());
                 }
                 else
                 {
-                    fprintf(agent->get_debug_fd(), "%16.10f %.4f RECV L %u R %u Unknown %s [%s] In: %u Out: %u Size: %u ", currentmjd(), dt.lap(), local_node, remote_node, out_comm_channel[use_channel].chanip.c_str(), type.c_str(), packet_in_count, packet_out_count, buf.size());
+                    fprintf(agent->get_debug_fd(), "%.4f %.4f RECV L %u R %u Unknown %s [%s] In: %u Out: %u Size: %u ", tet.split(), dt.lap(), node_id, node_id, out_comm_channel[use_channel].chanip.c_str(), type.c_str(), packet_in_count, packet_out_count, buf.size());
                 }
             }
             else
             {
-                fprintf(agent->get_debug_fd(), "%16.10f %.4f RECV L %u R %u %s %s [%s] In: %u Out: %u Size: %u ", currentmjd(), dt.lap(), local_node, remote_node, out_comm_channel[use_channel].node.c_str(), out_comm_channel[use_channel].chanip.c_str(), type.c_str(), packet_in_count, packet_out_count, buf.size());
+                fprintf(agent->get_debug_fd(), "%.4f %.4f RECV L %u R %u %s %s [%s] In: %u Out: %u Size: %u ", tet.split(), dt.lap(), node_id, node_id, out_comm_channel[use_channel].node.c_str(), out_comm_channel[use_channel].chanip.c_str(), type.c_str(), packet_in_count, packet_out_count, buf.size());
             }
         }
         else if (direction == PACKET_OUT)
         {
-            local_node = buf[PACKET_HEADER_OFFSET_NODE_ID];
-            switch (buf[0] & 0x0f)
-            {
-            case PACKET_HEARTBEAT:
-            case PACKET_REQQUEUE:
-            case PACKET_QUEUE:
-            case PACKET_REQMETA:
-                node_name = reinterpret_cast<char *>(&buf[PACKET_HEADER_OFFSET_NODE_NAME]);
-                remote_node = lookup_remote_node_id(node_name);
-                if (local_node == 0)
-                {
-                    local_node = add_node_name(node_name);
-                }
-                txq[local_node].remote_id = remote_node;
-                break;
-            case PACKET_METADATA:
-            case PACKET_REQDATA:
-            case PACKET_DATA:
-            case PACKET_COMPLETE:
-            case PACKET_CANCEL:
-                if (local_node > 0)
-                {
-                    remote_node = lookup_remote_node_id(local_node);
-                    node_name = txq[local_node].node_name;
-                }
-                break;
-            }
-
             if (out_comm_channel[use_channel].node.empty())
             {
                 if (!node_name.empty())
                 {
-                    fprintf(agent->get_debug_fd(), "%16.10f %.4f SEND L %u R %u %s %s [%s] In: %u Out: %u Size: %u ", currentmjd(), dt.lap(), local_node, remote_node, node_name.c_str(), out_comm_channel[use_channel].chanip.c_str(), type.c_str(), packet_in_count, packet_out_count, buf.size());
+                    fprintf(agent->get_debug_fd(), "%.4f %.4f SEND L %u R %u %s %s [%s] In: %u Out: %u Size: %u ", tet.split(), dt.lap(), node_id, node_id, node_name.c_str(), out_comm_channel[use_channel].chanip.c_str(), type.c_str(), packet_in_count, packet_out_count, buf.size());
                 }
                 else
                 {
-                    fprintf(agent->get_debug_fd(), "%16.10f %.4f SEND L %u R %u Unknown %s [%s] In: %u Out: %u Size: %u ", currentmjd(), dt.lap(), local_node, remote_node, out_comm_channel[use_channel].chanip.c_str(), type.c_str(), packet_in_count, packet_out_count, buf.size());
+                    fprintf(agent->get_debug_fd(), "%.4f %.4f SEND L %u R %u Unknown %s [%s] In: %u Out: %u Size: %u ", tet.split(), dt.lap(), node_id, node_id, out_comm_channel[use_channel].chanip.c_str(), type.c_str(), packet_in_count, packet_out_count, buf.size());
                 }
             }
             else
             {
-                fprintf(agent->get_debug_fd(), "%16.10f %.4f SEND L %u R %u %s %s [%s] In: %u Out: %u Size: %u ", currentmjd(), dt.lap(), local_node, remote_node, out_comm_channel[use_channel].node.c_str(), out_comm_channel[use_channel].chanip.c_str(), type.c_str(), packet_in_count, packet_out_count, buf.size());
+                fprintf(agent->get_debug_fd(), "%.4f %.4f SEND L %u R %u %s %s [%s] In: %u Out: %u Size: %u ", tet.split(), dt.lap(), node_id, node_id, out_comm_channel[use_channel].node.c_str(), out_comm_channel[use_channel].chanip.c_str(), type.c_str(), packet_in_count, packet_out_count, buf.size());
             }
         }
 
@@ -1757,22 +1768,32 @@ void debug_packet(vector<PACKET_BYTE> buf, uint8_t direction, string type, int32
         case PACKET_METADATA:
             {
                 string file_name(&buf[PACKET_METASHORT_OFFSET_FILE_NAME], &buf[PACKET_METASHORT_OFFSET_FILE_NAME+TRANSFER_MAX_FILENAME]);
-                fprintf(agent->get_debug_fd(), "[METADATA] %u %u %s ", local_node, buf[PACKET_METASHORT_OFFSET_TX_ID], file_name.c_str());
+                fprintf(agent->get_debug_fd(), "[METADATA] %u %u %s ", node_id, buf[PACKET_METASHORT_OFFSET_TX_ID], file_name.c_str());
                 break;
             }
         case PACKET_DATA:
             {
-                fprintf(agent->get_debug_fd(), "[DATA] %u %u %u %u ", local_node, buf[PACKET_DATA_OFFSET_TX_ID], buf[PACKET_DATA_OFFSET_CHUNK_START]+256U*(buf[PACKET_DATA_OFFSET_CHUNK_START+1]+256U*(buf[PACKET_DATA_OFFSET_CHUNK_START+2]+256U*buf[PACKET_DATA_OFFSET_CHUNK_START+3])), buf[PACKET_DATA_OFFSET_BYTE_COUNT]+256U*buf[PACKET_DATA_OFFSET_BYTE_COUNT+1]);
+                fprintf(agent->get_debug_fd(), "[DATA] %u %u %u %u ", node_id, buf[PACKET_DATA_OFFSET_TX_ID], buf[PACKET_DATA_OFFSET_CHUNK_START]+256U*(buf[PACKET_DATA_OFFSET_CHUNK_START+1]+256U*(buf[PACKET_DATA_OFFSET_CHUNK_START+2]+256U*buf[PACKET_DATA_OFFSET_CHUNK_START+3])), buf[PACKET_DATA_OFFSET_BYTE_COUNT]+256U*buf[PACKET_DATA_OFFSET_BYTE_COUNT+1]);
                 break;
             }
         case PACKET_REQDATA:
             {
-                fprintf(agent->get_debug_fd(), "[REQDATA] %u %u %u %u ", local_node, buf[PACKET_REQDATA_OFFSET_TX_ID], buf[PACKET_REQDATA_OFFSET_HOLE_START]+256U*(buf[PACKET_REQDATA_OFFSET_HOLE_START+1]+256U*(buf[PACKET_REQDATA_OFFSET_HOLE_START+2]+256U*buf[PACKET_REQDATA_OFFSET_HOLE_START+3])), buf[PACKET_REQDATA_OFFSET_HOLE_END]+256U*(buf[PACKET_REQDATA_OFFSET_HOLE_END+1]+256U*(buf[PACKET_REQDATA_OFFSET_HOLE_END+2]+256U*buf[PACKET_REQDATA_OFFSET_HOLE_END+3])));
+                fprintf(agent->get_debug_fd(), "[REQDATA] %u %u %u %u ", node_id, buf[PACKET_REQDATA_OFFSET_TX_ID], buf[PACKET_REQDATA_OFFSET_HOLE_START]+256U*(buf[PACKET_REQDATA_OFFSET_HOLE_START+1]+256U*(buf[PACKET_REQDATA_OFFSET_HOLE_START+2]+256U*buf[PACKET_REQDATA_OFFSET_HOLE_START+3])), buf[PACKET_REQDATA_OFFSET_HOLE_END]+256U*(buf[PACKET_REQDATA_OFFSET_HOLE_END+1]+256U*(buf[PACKET_REQDATA_OFFSET_HOLE_END+2]+256U*buf[PACKET_REQDATA_OFFSET_HOLE_END+3])));
+                break;
+            }
+        case PACKET_COMPLETE:
+            {
+                fprintf(agent->get_debug_fd(), "[COMPLETE] %u %u ", node_id, buf[PACKET_COMPLETE_OFFSET_TX_ID]);
+                break;
+            }
+        case PACKET_CANCEL:
+            {
+                fprintf(agent->get_debug_fd(), "[CANCEL] %u %u ", node_id, buf[PACKET_CANCEL_OFFSET_TX_ID]);
                 break;
             }
         case PACKET_REQMETA:
             {
-                fprintf(agent->get_debug_fd(), "[REQMETA] %u %s ", local_node, &buf[PACKET_REQMETA_OFFSET_NODE_NAME]);
+                fprintf(agent->get_debug_fd(), "[REQMETA] %u %s ", node_id, &buf[PACKET_HEADER_OFFSET_NODE_NAME]);
                 for (uint16_t i=0; i<TRANSFER_QUEUE_LIMIT; ++i)
                     if (buf[PACKET_REQMETA_OFFSET_TX_ID+i])
                     {
@@ -1780,24 +1801,14 @@ void debug_packet(vector<PACKET_BYTE> buf, uint8_t direction, string type, int32
                     }
                 break;
             }
-        case PACKET_COMPLETE:
-            {
-                fprintf(agent->get_debug_fd(), "[COMPLETE] %u %u ", local_node, buf[PACKET_COMPLETE_OFFSET_TX_ID]);
-                break;
-            }
-        case PACKET_CANCEL:
-            {
-                fprintf(agent->get_debug_fd(), "[CANCEL] %u %u ", local_node, buf[PACKET_CANCEL_OFFSET_TX_ID]);
-                break;
-            }
         case PACKET_REQQUEUE:
             {
-                fprintf(agent->get_debug_fd(), "[REQQUEUE] %u %s ", local_node, &buf[PACKET_QUEUE_OFFSET_NODE_NAME]);
+                fprintf(agent->get_debug_fd(), "[REQQUEUE] %u %s ", node_id, &buf[PACKET_HEADER_OFFSET_NODE_NAME]);
             }
             break;
         case PACKET_QUEUE:
             {
-                fprintf(agent->get_debug_fd(), "[QUEUE] %u %s ", local_node, &buf[PACKET_QUEUE_OFFSET_NODE_NAME]);
+                fprintf(agent->get_debug_fd(), "[QUEUE] %u %s ", node_id, &buf[PACKET_HEADER_OFFSET_NODE_NAME]);
                 for (uint16_t i=0; i<TRANSFER_QUEUE_LIMIT; ++i)
                     if (buf[PACKET_QUEUE_OFFSET_TX_ID+i])
                     {
@@ -1807,12 +1818,21 @@ void debug_packet(vector<PACKET_BYTE> buf, uint8_t direction, string type, int32
             break;
         case PACKET_HEARTBEAT:
             {
-                fprintf(agent->get_debug_fd(), "[HEARTBEAT] %u %s %hu %u %u", local_node, &buf[PACKET_HEARTBEAT_OFFSET_NODE_NAME], buf[PACKET_HEARTBEAT_OFFSET_BEAT_PERIOD]
+                fprintf(agent->get_debug_fd(), "[HEARTBEAT] %u %s %hu %u %u", node_id, &buf[PACKET_HEADER_OFFSET_NODE_NAME], buf[PACKET_HEARTBEAT_OFFSET_BEAT_PERIOD]
                         , buf[PACKET_HEARTBEAT_OFFSET_THROUGHPUT]+256U*(buf[PACKET_HEARTBEAT_OFFSET_THROUGHPUT+1]+256U*(buf[PACKET_HEARTBEAT_OFFSET_THROUGHPUT+2]+256U*buf[PACKET_HEARTBEAT_OFFSET_THROUGHPUT+3]))
                         , buf[PACKET_HEARTBEAT_OFFSET_FUNIXTIME]+256U*(buf[PACKET_HEARTBEAT_OFFSET_FUNIXTIME+1]+256U*(buf[PACKET_HEARTBEAT_OFFSET_FUNIXTIME+2]+256U*buf[PACKET_HEARTBEAT_OFFSET_FUNIXTIME+3])));
                 break;
             }
-
+        case PACKET_MESSAGE:
+            {
+                fprintf(agent->get_debug_fd(), "[MESSAGE] %u %hu %s", node_id, buf[PACKET_MESSAGE_OFFSET_LENGTH], &buf[PACKET_MESSAGE_OFFSET_BYTES]);
+                break;
+            }
+        case PACKET_COMMAND:
+            {
+                fprintf(agent->get_debug_fd(), "[COMMAND] %u %hu %s", node_id, buf[PACKET_COMMAND_OFFSET_LENGTH], &buf[PACKET_COMMAND_OFFSET_BYTES]);
+                break;
+            }
         }
         fprintf(agent->get_debug_fd(), "\n");
         fflush(agent->get_debug_fd());
@@ -1931,7 +1951,7 @@ int32_t read_meta(tx_progress& tx)
     if (agent->debug_level)
     {
         debug_fd_lock.lock();
-        fprintf(agent->get_debug_fd(), "%16.10f %.4f Main: read_meta: %s tx_id: %u chunks: %" PRIu32 "\n", currentmjd(), dt.lap(), (tx.temppath + ".meta").c_str(), tx.tx_id, tx.file_info.size());
+        fprintf(agent->get_debug_fd(), "%.4f %.4f Main: read_meta: %s tx_id: %u chunks: %" PRIu32 "\n", tet.split(), dt.lap(), (tx.temppath + ".meta").c_str(), tx.tx_id, tx.file_info.size());
         fflush(agent->get_debug_fd());
         debug_fd_lock.unlock();
     }
@@ -1950,6 +1970,13 @@ bool lower_chunk(file_progress i,file_progress j)
 
 PACKET_FILE_SIZE_TYPE merge_chunks_overlap(tx_progress& tx)
 {
+    for (uint16_t i=tx.file_info.size()-1; i<tx.file_info.size(); --i)
+    {
+        if (tx.file_info[i].chunk_end >= tx.file_size)
+        {
+            tx.file_info.pop_back();
+        }
+    }
     switch (tx.file_info.size())
     {
     case 0:
@@ -1991,6 +2018,11 @@ vector<file_progress> find_chunks_missing(tx_progress& tx)
 {
     vector<file_progress> missing;
     file_progress tp;
+
+    if (!tx.havemeta)
+    {
+        return missing;
+    }
 
     if (tx.file_info.size() == 0)
     {
@@ -2036,6 +2068,10 @@ vector<file_progress> find_chunks_missing(tx_progress& tx)
     for (file_progress prog : tx.file_info)
     {
         tx.total_bytes += (prog.chunk_end - prog.chunk_start) + 1;
+    }
+    if (tx.total_bytes == tx.file_size)
+    {
+        tx.complete = true;
     }
 
     return (missing);
@@ -2116,27 +2152,31 @@ int32_t request_ls(string &request, string &response, Agent *agent)
 
 int32_t request_list_incoming(string &request, string &response, Agent *agent)
 {
+    int32_t iretn;
     response.clear();
     for (uint16_t node = 0; node<txq.size(); ++node)
     {
-        response +=  to_unsigned(node) + ' ' + txq[(node)].node_name + ' ' + to_signed(txq[(node)].incoming.size) + "\n";
-        for(tx_progress tx : txq[(node)].incoming.progress)
+        if ((iretn=check_node_id(node)) > 0)
         {
-            if (tx.tx_id)
+            response +=  std::to_string(node) + ' ' + txq[(node)].node_name + ' ' +  std::to_string(txq[(node)].incoming.size) +  std::to_string(iretn)+ " rcvdqueue: " +  std::to_string(txq[(node)].incoming.rcvdmeta) + " rcvdmeta: " +  std::to_string(txq[(node)].incoming.rcvdmeta) + " rcvddata: " +  std::to_string(txq[(node)].incoming.rcvddata) + "\n";
+            for(tx_progress tx : txq[(node)].incoming.progress)
             {
-                response += to_label("tx_id", tx.tx_id);
-                response += to_label("node", tx.node_name);
-                response += to_label("agent", tx.agent_name);
-                response += to_label("name", tx.file_name);
-                response += to_label("bytes", tx.total_bytes);
-                response += "/" + to_unsigned(tx.file_size);
-                response += to_label("havemeta", tx.havemeta);
-                response += to_label("sendmeta", tx.sendmeta);
-                response += to_label("sentmeta", tx.sentmeta);
-                response += to_label("senddata", tx.senddata);
-                response += to_label("sentdata", tx.sentdata);
-                response += to_label("complete", tx.complete);
-                response += "\n";
+                if (tx.tx_id)
+                {
+                    response += to_label("tx_id", tx.tx_id) + ' ';
+                    response += to_label("node", tx.node_name) + ' ';
+                    response += to_label("agent", tx.agent_name) + ' ';
+                    response += to_label("name", tx.file_name) + ' ';
+                    response += to_label("bytes", tx.total_bytes) + ' ';
+                    response += "/" + to_unsigned(tx.file_size) + ' ';
+                    response += to_label("havemeta", tx.havemeta) + ' ';
+                    response += to_label("sendmeta", tx.sendmeta) + ' ';
+                    response += to_label("sentmeta", tx.sentmeta) + ' ';
+                    response += to_label("senddata", tx.senddata) + ' ';
+                    response += to_label("sentdata", tx.sentdata) + ' ';
+                    response += to_label("complete", tx.complete);
+                    response += "\n";
+                }
             }
         }
     }
@@ -2146,17 +2186,22 @@ int32_t request_list_incoming(string &request, string &response, Agent *agent)
 
 int32_t request_list_outgoing(string &request, string &response, Agent *agent)
 {
+    int32_t iretn;
     response.clear();
     for (uint16_t node=0; node<txq.size(); ++node)
     {
-        response +=  std::to_string(node)+ ' ' + txq[(node)].node_name + ' ' + std::to_string(txq[(node)].outgoing.size) + "\n";
-        for(tx_progress tx : txq[(node)].outgoing.progress)
+        if ((iretn=check_node_id(node)) > 0)
         {
-            if (tx.tx_id)
+            response +=  std::to_string(node)+ ' ' + txq[(node)].node_name + ' ' + std::to_string(txq[(node)].outgoing.size) + "\n";
+            for(tx_progress tx : txq[(node)].outgoing.progress)
             {
-                response +=  "tx_id: " + std::to_string(tx.tx_id) + " node: " + tx.node_name + " agent: " + tx.agent_name + " name: " + tx.file_name + " bytes: " + std::to_string(tx.total_bytes) + "/" + std::to_string(tx.file_size);
-                response += " havemeta: " + to_bool(tx.havemeta) + " sendmeta: " + to_bool(tx.sendmeta) + " sentmeta: " + to_bool(tx.sentmeta);
-                response += " senddata: " + to_bool(tx.senddata) + " sentdata: " + to_bool(tx.sentdata) + " complete: " + to_bool(tx.complete) + "\n";
+                if (tx.tx_id)
+                {
+                    response +=  "tx_id: " + std::to_string(tx.tx_id) + " node: " + tx.node_name + " agent: " + tx.agent_name + " name: " + tx.file_name + " bytes: " + std::to_string(tx.total_bytes) + "/" + std::to_string(tx.file_size);
+                    response += " enabled: " + to_bool(tx.enabled);
+                    response += " havemeta: " + to_bool(tx.havemeta) + " sendmeta: " + to_bool(tx.sendmeta) + " sentmeta: " + to_bool(tx.sentmeta);
+                    response += " senddata: " + to_bool(tx.senddata) + " sentdata: " + to_bool(tx.sentdata) + " complete: " + to_bool(tx.complete) + "\n";
+                }
             }
         }
     }
@@ -2230,13 +2275,13 @@ int32_t outgoing_tx_add(tx_progress &tx_out)
     if (agent->debug_level)
     {
         debug_fd_lock.lock();
-        fprintf(agent->get_debug_fd(), "%16.10f %.4f Main: outgoing_tx_add: ", currentmjd(), dt.lap());
+        fprintf(agent->get_debug_fd(), "%.4f %.4f Main: outgoing_tx_add: ", tet.split(), dt.lap());
         fflush(agent->get_debug_fd());
         debug_fd_lock.unlock();
     }
 
-    int32_t local_node = lookup_local_node_id(tx_out.node_name);
-    if (local_node == 0)
+    int32_t node_id = lookup_node_id(tx_out.node_name);
+    if (node_id <= 0)
     {
         if (agent->debug_level)
         {
@@ -2245,21 +2290,33 @@ int32_t outgoing_tx_add(tx_progress &tx_out)
             fflush(agent->get_debug_fd());
             debug_fd_lock.unlock();
         }
-        return TRANSFER_ERROR_NODE;
+        if (node_id == 0)
+        {
+            return TRANSFER_ERROR_NODE;
+        }
+        else
+        {
+            return node_id;
+        }
     }
 
-    // Only add if we have room
-    if (txq[(local_node)].outgoing.size == TRANSFER_QUEUE_LIMIT)
+    // Check for duplicate tx_id
+    if (txq[(node_id)].outgoing.progress[tx_out.tx_id].tx_id)
     {
-        if (agent->debug_level)
-        {
-            debug_fd_lock.lock();
-            fprintf(agent->get_debug_fd(), "TRANSFER_ERROR_QUEUEFULL\n");
-            fflush(agent->get_debug_fd());
-            debug_fd_lock.unlock();
-        }
-        return TRANSFER_ERROR_QUEUEFULL;
+        return TRANSFER_ERROR_DUPLICATE;
     }
+    // Only add if we have room
+//    if (txq[(node_id)].outgoing.size == PROGRESS_QUEUE_SIZE)
+//    {
+//        if (agent->debug_level)
+//        {
+//            debug_fd_lock.lock();
+//            fprintf(agent->get_debug_fd(), "TRANSFER_ERROR_QUEUEFULL\n");
+//            fflush(agent->get_debug_fd());
+//            debug_fd_lock.unlock();
+//        }
+//        return TRANSFER_ERROR_QUEUEFULL;
+//    }
 
     //    tx_out.state = STATE_QUEUE;
     if (tx_out.file_name.size())
@@ -2282,9 +2339,10 @@ int32_t outgoing_tx_add(tx_progress &tx_out)
     tx_out.temppath = data_base_path(tx_out.node_name, "temp", "file", "out_"+std::to_string(tx_out.tx_id));
 
     // Check for a duplicate file name of something already in queue
-    for (uint16_t i=1; i<PROGRESS_QUEUE_SIZE; ++i)
+    uint16_t minindex = 255 - static_cast<uint16_t>(pow(pow(TRANSFER_QUEUE_LIMIT,1.f/3.f), (3.f - log10f(tx_out.file_size) / 2.f)));
+    for (uint16_t i=minindex; i<256; ++i)
     {
-        if (!txq[(local_node)].outgoing.progress[i].filepath.empty() && tx_out.filepath == txq[(local_node)].outgoing.progress[i].filepath)
+        if (!txq[(node_id)].outgoing.progress[i].filepath.empty() && tx_out.filepath == txq[(node_id)].outgoing.progress[i].filepath)
         {
             // Remove the META file
             if (agent->debug_level)
@@ -2323,40 +2381,42 @@ int32_t outgoing_tx_add(tx_progress &tx_out)
 
     // Good to go. Add it to queue.
     outgoing_tx_lock.lock();
-    //    txq[(local_node)].outgoing.progress[tx_out.tx_id] = tx_out;
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].tx_id = tx_out.tx_id;
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].havemeta = tx_out.havemeta;
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].sendmeta = tx_out.sendmeta;
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].sentmeta = tx_out.sentmeta;
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].senddata = tx_out.senddata;
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].sentdata = tx_out.sentdata;
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].complete = tx_out.complete;
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].node_name = tx_out.node_name;
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].agent_name = tx_out.agent_name;
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].file_name = tx_out.file_name;
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].filepath = tx_out.filepath;
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].temppath = tx_out.temppath;
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].savetime = tx_out.savetime;
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].file_size = tx_out.file_size;
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].total_bytes = tx_out.total_bytes;
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].file_info.clear();
+    //    txq[(node_id)].outgoing.progress[tx_out.tx_id] = tx_out;
+
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].tx_id = tx_out.tx_id;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].havemeta = tx_out.havemeta;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].sendmeta = tx_out.sendmeta;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].sentmeta = tx_out.sentmeta;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].senddata = tx_out.senddata;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].sentdata = tx_out.sentdata;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].complete = tx_out.complete;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].node_name = tx_out.node_name;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].agent_name = tx_out.agent_name;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].file_name = tx_out.file_name;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].filepath = tx_out.filepath;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].temppath = tx_out.temppath;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].savetime = tx_out.savetime;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].datatime = tx_out.datatime;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].file_size = tx_out.file_size;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].total_bytes = tx_out.total_bytes;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].file_info.clear();
     for (file_progress filep : tx_out.file_info)
     {
-        txq[(local_node)].outgoing.progress[tx_out.tx_id].file_info.push_back(filep);
+        txq[(node_id)].outgoing.progress[tx_out.tx_id].file_info.push_back(filep);
     }
-    txq[(local_node)].outgoing.progress[tx_out.tx_id].fp = tx_out.fp;
-    ++txq[(local_node)].outgoing.size;
+    txq[(node_id)].outgoing.progress[tx_out.tx_id].fp = tx_out.fp;
+    ++txq[(node_id)].outgoing.size;
     outgoing_tx_lock.unlock();
 
     if (agent->debug_level)
     {
         debug_fd_lock.lock();
-        fprintf(agent->get_debug_fd(), " %u\n", txq[(local_node)].outgoing.size);
+        fprintf(agent->get_debug_fd(), " %u\n", txq[(node_id)].outgoing.size);
         fflush(agent->get_debug_fd());
         debug_fd_lock.unlock();
     }
 
-    return outgoing_tx_recount(local_node);
+    return outgoing_tx_recount(node_id);
 }
 
 int32_t outgoing_tx_add(string node_name, string agent_name, string file_name)
@@ -2366,7 +2426,7 @@ int32_t outgoing_tx_add(string node_name, string agent_name, string file_name)
         if (agent->debug_level)
         {
             debug_fd_lock.lock();
-            fprintf(agent->get_debug_fd(), "%16.10f %.4f Main: outgoing_tx_add: TRANSFER_ERROR_FILENAME\n", currentmjd(), dt.lap());
+            fprintf(agent->get_debug_fd(), "%.4f %.4f Main: outgoing_tx_add: TRANSFER_ERROR_FILENAME\n", tet.split(), dt.lap());
             fflush(agent->get_debug_fd());
             debug_fd_lock.unlock();
         }
@@ -2376,14 +2436,14 @@ int32_t outgoing_tx_add(string node_name, string agent_name, string file_name)
     // BEGIN GATHERING THE METADATA
     tx_progress tx_out;
 
-    uint8_t local_node = lookup_local_node_id(node_name);
-    if (local_node == 0)
+    uint8_t node_id = lookup_node_id(node_name);
+    if (node_id == 0)
     {
         return TRANSFER_ERROR_NODE;
     }
 
     // Only add if we have room
-    if (txq[(local_node)].outgoing.size == TRANSFER_QUEUE_LIMIT)
+    if (txq[(node_id)].outgoing.size == PROGRESS_QUEUE_SIZE)
     {
         return TRANSFER_ERROR_QUEUEFULL;
     }
@@ -2391,24 +2451,47 @@ int32_t outgoing_tx_add(string node_name, string agent_name, string file_name)
     // Locate next empty space
     //get the file size
     outgoing_tx_lock.lock();
-    tx_out.tx_id = 0;
-    PACKET_TX_ID_TYPE id = txq[(local_node)].outgoing.next_id;
-    do
-    {
-        // 0 is special case
-        if (id == 0)
-        {
-            ++id;
-        }
+    string filepath = data_base_path(node_name, "outgoing", agent_name, file_name);
+    int32_t file_size = get_file_size(filepath);
 
-        if (txq[(local_node)].outgoing.progress[id].tx_id == 0)
+    // Go through existing queue
+    // - if it is already there and the size is different, remove it
+    // - if it is already there, and the size is the same, set enable it
+    // - if it is not already there and there is room to add is, go on to next step
+    for (uint16_t i=1; i<PROGRESS_QUEUE_SIZE; ++i)
+    {
+        if (txq[(node_id)].outgoing.progress[i].filepath == filepath)
+        {
+            if (txq[(node_id)].outgoing.progress[i].file_size == file_size)
+            {
+                txq[(node_id)].outgoing.progress[i].enabled = true;
+                if (agent->debug_level)
+                {
+                    debug_fd_lock.lock();
+                    fprintf(agent->get_debug_fd(), ".4f %.4f Main: outgoing_tx_add: Enable %u %s %s %s %lu ", tet.split(), dt.lap(), txq[(node_id)].outgoing.progress[i].tx_id, txq[(node_id)].outgoing.progress[i].node_name.c_str(), txq[(node_id)].outgoing.progress[i].agent_name.c_str(), txq[(node_id)].outgoing.progress[i].filepath.c_str(), PROGRESS_QUEUE_SIZE);
+                    fflush(agent->get_debug_fd());
+                    debug_fd_lock.unlock();
+                }
+                return node_id;
+            }
+            else
+            {
+                outgoing_tx_del(node_id, i, false);
+                return TRANSFER_ERROR_FILESIZE;
+            }
+        }
+    }
+
+    uint16_t minindex = TRANSFER_QUEUE_LIMIT - static_cast<uint16_t>(pow(pow(TRANSFER_QUEUE_LIMIT,1.f/3.f), (3.f - log10f(file_size) / 2.f)));
+    tx_out.tx_id = 0;
+    for (uint16_t id=minindex; id<PROGRESS_QUEUE_SIZE; ++id)
+    {
+        if (txq[(node_id)].outgoing.progress[id].tx_id == 0)
         {
             tx_out.tx_id = id;
-            txq[(local_node)].outgoing.next_id = id + 1;
             break;
         }
-        // If no empty found, increment, allowing to wrap if necessary
-    } while (++id != txq[(local_node)].outgoing.next_id);
+    }
     outgoing_tx_lock.unlock();
 
     if (tx_out.tx_id > 0)
@@ -2424,20 +2507,22 @@ int32_t outgoing_tx_add(string node_name, string agent_name, string file_name)
         tx_out.agent_name = agent_name;
         tx_out.file_name = file_name;
         tx_out.temppath = data_base_path(tx_out.node_name, "temp", "file", "out_"+std::to_string(tx_out.tx_id));
-        tx_out.filepath = data_base_path(tx_out.node_name, "outgoing", tx_out.agent_name, tx_out.file_name);
+        tx_out.filepath = filepath;
+//        tx_out.filepath = data_base_path(tx_out.node_name, "outgoing", tx_out.agent_name, tx_out.file_name);
         tx_out.savetime = 0.;
 
         std::ifstream filename;
 
         //get the file size
-        tx_out.file_size = get_file_size(tx_out.filepath);
+//        tx_out.file_size = get_file_size(tx_out.filepath);
+        tx_out.file_size = file_size;
 
         if(tx_out.file_size < 0)
         {
             if (agent->debug_level)
             {
                 debug_fd_lock.lock();
-                fprintf(agent->get_debug_fd(), "%16.10f %.4f Main: outgoing_tx_add: DATA_ERROR_SIZE_MISMATCH\n", currentmjd(), dt.lap());
+                fprintf(agent->get_debug_fd(), "%.4f %.4f Main: outgoing_tx_add: DATA_ERROR_SIZE_MISMATCH\n", tet.split(), dt.lap());
                 fflush(agent->get_debug_fd());
                 debug_fd_lock.unlock();
             }
@@ -2451,7 +2536,7 @@ int32_t outgoing_tx_add(string node_name, string agent_name, string file_name)
             if (agent->debug_level)
             {
                 debug_fd_lock.lock();
-                fprintf(agent->get_debug_fd(), "%16.10f %.4f Main: outgoing_tx_add: %s\n", currentmjd(), dt.lap(), cosmos_error_string(-errno).c_str());
+                fprintf(agent->get_debug_fd(), "%.4f %.4f Main: outgoing_tx_add: %s\n", tet.split(), dt.lap(), cosmos_error_string(-errno).c_str());
                 fflush(agent->get_debug_fd());
                 debug_fd_lock.unlock();
             }
@@ -2475,14 +2560,14 @@ int32_t outgoing_tx_add(string node_name, string agent_name, string file_name)
     }
 }
 
-int32_t outgoing_tx_del(uint8_t local_node, uint16_t tx_id)
+int32_t outgoing_tx_del(uint8_t node_id, uint16_t tx_id, bool remove_file)
 {
-    if (local_node == 0 || local_node >= txq.size())
+    if (node_id == 0 || node_id >= txq.size())
     {
         return TRANSFER_ERROR_INDEX;
     }
 
-    if (txq[(local_node)].outgoing.progress[tx_id].tx_id == 0)
+    if (txq[(node_id)].outgoing.progress[tx_id].tx_id == 0)
     {
         return TRANSFER_ERROR_MATCH;
     }
@@ -2491,41 +2576,42 @@ int32_t outgoing_tx_del(uint8_t local_node, uint16_t tx_id)
     {
         for (uint16_t i=1; i<PROGRESS_QUEUE_SIZE; ++i)
         {
-            outgoing_tx_del(local_node, i);
+            outgoing_tx_del(node_id, i);
         }
     }
     else
     {
-        tx_progress tx_out = txq[(local_node)].outgoing.progress[tx_id];
+        tx_progress tx_out = txq[(node_id)].outgoing.progress[tx_id];
 
         // erase the transaction
 
-        txq[(local_node)].outgoing.progress[tx_id].fp = nullptr;
-        txq[(local_node)].outgoing.progress[tx_id].tx_id = 0;
-        txq[(local_node)].outgoing.progress[tx_id].complete = false;
-        txq[(local_node)].outgoing.progress[tx_id].filepath = "";
-        txq[(local_node)].outgoing.progress[tx_id].havemeta = false;
-        txq[(local_node)].outgoing.progress[tx_id].savetime = 0;
-        txq[(local_node)].outgoing.progress[tx_id].temppath = "";
-        txq[(local_node)].outgoing.progress[tx_id].file_name = "";
-        txq[(local_node)].outgoing.progress[tx_id].file_size = 0;
-        txq[(local_node)].outgoing.progress[tx_id].node_name = "";
-        txq[(local_node)].outgoing.progress[tx_id].agent_name = "";
-        txq[(local_node)].outgoing.progress[tx_id].total_bytes = 0;
-        txq[(local_node)].outgoing.progress[tx_id].file_info.clear();
+        txq[(node_id)].outgoing.progress[tx_id].fp = nullptr;
+        txq[(node_id)].outgoing.progress[tx_id].enabled = false;
+        txq[(node_id)].outgoing.progress[tx_id].tx_id = 0;
+        txq[(node_id)].outgoing.progress[tx_id].complete = false;
+        txq[(node_id)].outgoing.progress[tx_id].filepath = "";
+        txq[(node_id)].outgoing.progress[tx_id].havemeta = false;
+        txq[(node_id)].outgoing.progress[tx_id].savetime = 0;
+        txq[(node_id)].outgoing.progress[tx_id].temppath = "";
+        txq[(node_id)].outgoing.progress[tx_id].file_name = "";
+        txq[(node_id)].outgoing.progress[tx_id].file_size = 0;
+        txq[(node_id)].outgoing.progress[tx_id].node_name = "";
+        txq[(node_id)].outgoing.progress[tx_id].agent_name = "";
+        txq[(node_id)].outgoing.progress[tx_id].total_bytes = 0;
+        txq[(node_id)].outgoing.progress[tx_id].file_info.clear();
 
-        if (txq[(local_node)].outgoing.size)
+        if (txq[(node_id)].outgoing.size)
         {
-            --txq[(local_node)].outgoing.size;
+            --txq[(node_id)].outgoing.size;
         }
 
         // Remove the file
-        if(remove(tx_out.filepath.c_str()))
+        if(remove_file && remove(tx_out.filepath.c_str()))
         {
             if (agent->debug_level)
             {
                 debug_fd_lock.lock();
-                fprintf(agent->get_debug_fd(), "%16.10f %.4f Main/Outgoing: Del outgoing: %u %s %s %s - Unable to remove file\n", currentmjd(), dt.lap(), tx_out.tx_id, tx_out.node_name.c_str(), tx_out.agent_name.c_str(), tx_out.file_name.c_str());
+                fprintf(agent->get_debug_fd(), "%.4f %.4f Main/Outgoing: Del outgoing: %u %s %s %s - Unable to remove file\n", tet.split(), dt.lap(), tx_out.tx_id, tx_out.node_name.c_str(), tx_out.agent_name.c_str(), tx_out.file_name.c_str());
                 fflush(agent->get_debug_fd());
                 debug_fd_lock.unlock();
             }
@@ -2538,18 +2624,18 @@ int32_t outgoing_tx_del(uint8_t local_node, uint16_t tx_id)
         if (agent->debug_level)
         {
             debug_fd_lock.lock();
-            fprintf(agent->get_debug_fd(), "%16.10f %.4f Main/Outgoing: Del outgoing: %u %s %s %s\n", currentmjd(), dt.lap(), tx_out.tx_id, tx_out.node_name.c_str(), tx_out.agent_name.c_str(), tx_out.file_name.c_str());
+            fprintf(agent->get_debug_fd(), "%.4f %.4f Main/Outgoing: Del outgoing: %u %s %s %s\n", tet.split(), dt.lap(), tx_out.tx_id, tx_out.node_name.c_str(), tx_out.agent_name.c_str(), tx_out.file_name.c_str());
             fflush(agent->get_debug_fd());
             debug_fd_lock.unlock();
         }
     }
 
-    return outgoing_tx_recount(local_node);
+    return outgoing_tx_recount(node_id);
 }
 
-int32_t outgoing_tx_purge(uint8_t local_node, uint16_t tx_id)
+int32_t outgoing_tx_purge(uint8_t node_id, uint16_t tx_id)
 {
-    if (local_node == 0 || local_node >= txq.size())
+    if (node_id == 0 || node_id >= txq.size())
     {
         return TRANSFER_ERROR_INDEX;
     }
@@ -2558,92 +2644,92 @@ int32_t outgoing_tx_purge(uint8_t local_node, uint16_t tx_id)
     {
         for (uint16_t i=1; i<PROGRESS_QUEUE_SIZE; ++i)
         {
-            txq[(local_node)].outgoing.progress[i].fp = nullptr;
-            txq[(local_node)].outgoing.progress[i].tx_id = 0;
-            txq[(local_node)].outgoing.progress[i].complete = false;
-            txq[(local_node)].outgoing.progress[i].filepath = "";
-            txq[(local_node)].outgoing.progress[i].havemeta = false;
-            txq[(local_node)].outgoing.progress[i].savetime = 0;
-            txq[(local_node)].outgoing.progress[i].temppath = "";
-            txq[(local_node)].outgoing.progress[i].file_name = "";
-            txq[(local_node)].outgoing.progress[i].file_size = 0;
-            txq[(local_node)].outgoing.progress[i].node_name = "";
-            txq[(local_node)].outgoing.progress[i].agent_name = "";
-            txq[(local_node)].outgoing.progress[i].total_bytes = 0;
-            txq[(local_node)].outgoing.progress[i].file_info.clear();
+            txq[(node_id)].outgoing.progress[i].fp = nullptr;
+            txq[(node_id)].outgoing.progress[i].tx_id = 0;
+            txq[(node_id)].outgoing.progress[i].complete = false;
+            txq[(node_id)].outgoing.progress[i].filepath = "";
+            txq[(node_id)].outgoing.progress[i].havemeta = false;
+            txq[(node_id)].outgoing.progress[i].savetime = 0;
+            txq[(node_id)].outgoing.progress[i].temppath = "";
+            txq[(node_id)].outgoing.progress[i].file_name = "";
+            txq[(node_id)].outgoing.progress[i].file_size = 0;
+            txq[(node_id)].outgoing.progress[i].node_name = "";
+            txq[(node_id)].outgoing.progress[i].agent_name = "";
+            txq[(node_id)].outgoing.progress[i].total_bytes = 0;
+            txq[(node_id)].outgoing.progress[i].file_info.clear();
         }
     }
     else {
         {
-            txq[(local_node)].outgoing.progress[tx_id].fp = nullptr;
-            txq[(local_node)].outgoing.progress[tx_id].tx_id = 0;
-            txq[(local_node)].outgoing.progress[tx_id].complete = false;
-            txq[(local_node)].outgoing.progress[tx_id].filepath = "";
-            txq[(local_node)].outgoing.progress[tx_id].havemeta = false;
-            txq[(local_node)].outgoing.progress[tx_id].savetime = 0;
-            txq[(local_node)].outgoing.progress[tx_id].temppath = "";
-            txq[(local_node)].outgoing.progress[tx_id].file_name = "";
-            txq[(local_node)].outgoing.progress[tx_id].file_size = 0;
-            txq[(local_node)].outgoing.progress[tx_id].node_name = "";
-            txq[(local_node)].outgoing.progress[tx_id].agent_name = "";
-            txq[(local_node)].outgoing.progress[tx_id].total_bytes = 0;
-            txq[(local_node)].outgoing.progress[tx_id].file_info.clear();
+            txq[(node_id)].outgoing.progress[tx_id].fp = nullptr;
+            txq[(node_id)].outgoing.progress[tx_id].tx_id = 0;
+            txq[(node_id)].outgoing.progress[tx_id].complete = false;
+            txq[(node_id)].outgoing.progress[tx_id].filepath = "";
+            txq[(node_id)].outgoing.progress[tx_id].havemeta = false;
+            txq[(node_id)].outgoing.progress[tx_id].savetime = 0;
+            txq[(node_id)].outgoing.progress[tx_id].temppath = "";
+            txq[(node_id)].outgoing.progress[tx_id].file_name = "";
+            txq[(node_id)].outgoing.progress[tx_id].file_size = 0;
+            txq[(node_id)].outgoing.progress[tx_id].node_name = "";
+            txq[(node_id)].outgoing.progress[tx_id].agent_name = "";
+            txq[(node_id)].outgoing.progress[tx_id].total_bytes = 0;
+            txq[(node_id)].outgoing.progress[tx_id].file_info.clear();
         }
     }
-    txq[(local_node)].outgoing.size = 0;
+    txq[(node_id)].outgoing.size = 0;
 
     return 0;
 }
 
-int32_t outgoing_tx_recount(uint8_t local_node)
+int32_t outgoing_tx_recount(uint8_t node_id)
 {
-    if (local_node == 0 || local_node >= txq.size())
+    if (node_id == 0 || node_id >= txq.size())
     {
         return TRANSFER_ERROR_INDEX;
     }
 
-    txq[(local_node)].outgoing.size = 0;
+    txq[(node_id)].outgoing.size = 0;
     for (uint16_t i=1; i<PROGRESS_QUEUE_SIZE; ++i)
     {
-        if (txq[(local_node)].outgoing.progress[i].tx_id)
+        if (txq[(node_id)].outgoing.progress[i].tx_id)
         {
-            ++txq[(local_node)].outgoing.size;
+            ++txq[(node_id)].outgoing.size;
         }
     }
-    return txq[(local_node)].outgoing.size;
+    return txq[(node_id)].outgoing.size;
 }
 
-int32_t outgoing_tx_load(uint8_t local_node)
+int32_t outgoing_tx_load(uint8_t node_id)
 {
     int32_t iretn=0;
 
     // Go through outgoing queue, removing files that no longer exist
     for (uint16_t i=1; i<PROGRESS_QUEUE_SIZE; ++i)
     {
-        if (txq[(local_node)].outgoing.progress[i].tx_id != 0 && !data_isfile(txq[(local_node)].outgoing.progress[i].filepath))
+        if (txq[(node_id)].outgoing.progress[i].tx_id != 0 && !data_isfile(txq[(node_id)].outgoing.progress[i].filepath))
         {
-            outgoing_tx_del(local_node, txq[(local_node)].outgoing.progress[i].tx_id);
+            outgoing_tx_del(node_id, txq[(node_id)].outgoing.progress[i].tx_id);
         }
     }
 
     // Go through outgoing directories, adding files not already in queue
-    if (txq[(local_node)].outgoing.size < TRANSFER_QUEUE_LIMIT)
+    if (txq[(node_id)].outgoing.size < PROGRESS_QUEUE_SIZE)
     {
         vector<filestruc> file_names;
-        for (filestruc file : data_list_files(txq[(local_node)].node_name, "outgoing", ""))
+        for (filestruc file : data_list_files(txq[(node_id)].node_name, "outgoing", ""))
         {
             if (file.type == "directory")
             {
-                iretn = data_list_files(txq[(local_node)].node_name, "outgoing", file.name, file_names);
+                iretn = data_list_files(txq[(node_id)].node_name, "outgoing", file.name, file_names);
             }
         }
 
         // Sort list by size, then go through list of files found, adding to queue.
-        sort(file_names.begin(), file_names.end(), filestruc_compare_by_size);
+        sort(file_names.begin(), file_names.end(), filestruc_smaller_by_size);
         for(uint16_t i=0; i<file_names.size(); ++i)
         {
             filestruc file = file_names[i];
-            if (txq[(local_node)].outgoing.size >= TRANSFER_QUEUE_LIMIT)
+            if (txq[(node_id)].outgoing.size >= PROGRESS_QUEUE_SIZE)
             {
                 break;
             }
@@ -2655,19 +2741,50 @@ int32_t outgoing_tx_load(uint8_t local_node)
             }
 
             // Ignore zero length files (may still be being formed)
-            if (file.size == 0)
-            {
-                continue;
-            }
+//            if (file.size == 0)
+//            {
+//                continue;
+//            }
 
+            // Go through existing queue
+            // - if it is already there and the size is different, remove it from queue
+            // - if it is already there, and the size is the same, enable it
+            // - if it is enabled and the size is zero, remove it from queue and remove file
             bool addtoqueue = true;
             outgoing_tx_lock.lock();
-            for(tx_progress progress : txq[(local_node)].outgoing.progress)
+            for (uint16_t i=1; i<PROGRESS_QUEUE_SIZE; ++i)
             {
-                if (progress.tx_id && file.path == progress.filepath)
+                if (txq[(node_id)].outgoing.progress[i].filepath == file.path)
                 {
-                    addtoqueue = false;
-                    break;
+                    if (txq[(node_id)].outgoing.progress[i].file_size == file.size)
+                    {
+                        addtoqueue = false;
+                        if (!txq[(node_id)].outgoing.progress[i].enabled)
+                        {
+                            txq[(node_id)].outgoing.progress[i].enabled = true;
+                            if (agent->debug_level)
+                            {
+                                debug_fd_lock.lock();
+                                fprintf(agent->get_debug_fd(), "%.4f %.4f Main: outgoing_tx_add: Enable %u %s %s %s %lu\n", tet.split(), dt.lap(), txq[(node_id)].outgoing.progress[i].tx_id, txq[(node_id)].outgoing.progress[i].node_name.c_str(), txq[(node_id)].outgoing.progress[i].agent_name.c_str(), txq[(node_id)].outgoing.progress[i].filepath.c_str(), PROGRESS_QUEUE_SIZE);
+                                fflush(agent->get_debug_fd());
+                                debug_fd_lock.unlock();
+
+                            }
+                        }
+                        iretn = 0;
+                    }
+                    else
+                    {
+                        outgoing_tx_del(node_id, i, false);
+                        addtoqueue = false;
+                        iretn = TRANSFER_ERROR_FILESIZE;
+                    }
+                    if (txq[(node_id)].outgoing.progress[i].enabled && txq[(node_id)].outgoing.progress[i].file_size == 0)
+                    {
+                        outgoing_tx_del(node_id, i, true);
+                        addtoqueue = false;
+                        iretn = TRANSFER_ERROR_FILEZERO;
+                    }
                 }
             }
 
@@ -2676,10 +2793,10 @@ int32_t outgoing_tx_load(uint8_t local_node)
             if (addtoqueue)
             {
                 iretn = outgoing_tx_add(file.node, file.agent, file.name);
-                if (agent->debug_level)
+                if (agent->debug_level && iretn != -471)
                 {
                     debug_fd_lock.lock();
-                    fprintf(agent->get_debug_fd(), "%16.10f %.4f Main/Load: outgoing_tx_add: %s [%d]\n", currentmjd(), dt.lap(), file.path.c_str(), iretn);
+                    fprintf(agent->get_debug_fd(), "%.4f %.4f Main/Load: outgoing_tx_add: %s [%d]\n", tet.split(), dt.lap(), file.path.c_str(), iretn);
                     fflush(agent->get_debug_fd());
                     debug_fd_lock.unlock();
                 }
@@ -2692,13 +2809,13 @@ int32_t outgoing_tx_load(uint8_t local_node)
 
 int32_t incoming_tx_add(tx_progress &tx_in)
 {
-    uint8_t local_node = lookup_local_node_id(tx_in.node_name);
-    if (local_node == 0)
+    uint8_t node_id = lookup_node_id(tx_in.node_name);
+    if (node_id == 0)
     {
         if (agent->debug_level)
         {
             debug_fd_lock.lock();
-            fprintf(agent->get_debug_fd(), "%16.10f %.4f Main: incoming_tx_add: TRANSFER_ERROR_NODE\n", currentmjd(), dt.lap());
+            fprintf(agent->get_debug_fd(), "%.4f %.4f Main: incoming_tx_add: TRANSFER_ERROR_NODE\n", tet.split(), dt.lap());
             fflush(agent->get_debug_fd());
             debug_fd_lock.unlock();
         }
@@ -2721,7 +2838,7 @@ int32_t incoming_tx_add(tx_progress &tx_in)
     // Check for a duplicate file name of something already in queue
     for (uint16_t i=1; i<PROGRESS_QUEUE_SIZE; ++i)
     {
-        if (!txq[(local_node)].incoming.progress[i].filepath.empty() && tx_in.filepath == txq[(local_node)].incoming.progress[i].filepath)
+        if (!txq[(node_id)].incoming.progress[i].filepath.empty() && tx_in.filepath == txq[(node_id)].incoming.progress[i].filepath)
         {
             if (agent->debug_level)
             {
@@ -2750,39 +2867,39 @@ int32_t incoming_tx_add(tx_progress &tx_in)
     //    }
 
     // Put it in list
-    //    txq[(local_node)].incoming.progress[tx_in.tx_id] = tx_in;
-    txq[(local_node)].incoming.progress[tx_in.tx_id].tx_id = tx_in.tx_id;
-    txq[(local_node)].incoming.progress[tx_in.tx_id].havemeta = tx_in.havemeta;
-    txq[(local_node)].incoming.progress[tx_in.tx_id].sendmeta = tx_in.sendmeta;
-    txq[(local_node)].incoming.progress[tx_in.tx_id].sentmeta = tx_in.sentmeta;
-    txq[(local_node)].incoming.progress[tx_in.tx_id].senddata = tx_in.senddata;
-    txq[(local_node)].incoming.progress[tx_in.tx_id].sentdata = tx_in.sentdata;
-    txq[(local_node)].incoming.progress[tx_in.tx_id].complete = tx_in.complete;
-    txq[(local_node)].incoming.progress[tx_in.tx_id].node_name = tx_in.node_name;
-    txq[(local_node)].incoming.progress[tx_in.tx_id].agent_name = tx_in.agent_name;
-    txq[(local_node)].incoming.progress[tx_in.tx_id].file_name = tx_in.file_name;
-    txq[(local_node)].incoming.progress[tx_in.tx_id].filepath = tx_in.filepath;
-    txq[(local_node)].incoming.progress[tx_in.tx_id].temppath = tx_in.temppath;
-    txq[(local_node)].incoming.progress[tx_in.tx_id].savetime = tx_in.savetime;
-    txq[(local_node)].incoming.progress[tx_in.tx_id].file_size = tx_in.file_size;
-    txq[(local_node)].incoming.progress[tx_in.tx_id].total_bytes = tx_in.total_bytes;
-    txq[(local_node)].incoming.progress[tx_in.tx_id].file_info.clear();
+    //    txq[(node_id)].incoming.progress[tx_in.tx_id] = tx_in;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].tx_id = tx_in.tx_id;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].havemeta = tx_in.havemeta;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].sendmeta = tx_in.sendmeta;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].sentmeta = tx_in.sentmeta;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].senddata = tx_in.senddata;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].sentdata = tx_in.sentdata;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].complete = tx_in.complete;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].node_name = tx_in.node_name;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].agent_name = tx_in.agent_name;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].file_name = tx_in.file_name;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].filepath = tx_in.filepath;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].temppath = tx_in.temppath;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].savetime = tx_in.savetime;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].file_size = tx_in.file_size;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].total_bytes = tx_in.total_bytes;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].file_info.clear();
     for (file_progress filep : tx_in.file_info)
     {
-        txq[(local_node)].incoming.progress[tx_in.tx_id].file_info.push_back(filep);
+        txq[(node_id)].incoming.progress[tx_in.tx_id].file_info.push_back(filep);
     }
-    txq[(local_node)].incoming.progress[tx_in.tx_id].fp = tx_in.fp;
-    ++txq[(local_node)].incoming.size;
+    txq[(node_id)].incoming.progress[tx_in.tx_id].fp = tx_in.fp;
+    ++txq[(node_id)].incoming.size;
 
     if (agent->debug_level)
     {
         debug_fd_lock.lock();
-        fprintf(agent->get_debug_fd(), "%16.10f %.4f Main/Incoming: Add incoming: %u %s %s %s %lu\n", currentmjd(), dt.lap(), tx_in.tx_id, tx_in.node_name.c_str(), tx_in.agent_name.c_str(), tx_in.filepath.c_str(), PROGRESS_QUEUE_SIZE);
+        fprintf(agent->get_debug_fd(), "%.4f %.4f Main/Incoming: Add incoming: %u %s %s %s %lu\n", tet.split(), dt.lap(), tx_in.tx_id, tx_in.node_name.c_str(), tx_in.agent_name.c_str(), tx_in.filepath.c_str(), PROGRESS_QUEUE_SIZE);
         fflush(agent->get_debug_fd());
         debug_fd_lock.unlock();
     }
 
-    return incoming_tx_recount(local_node);
+    return incoming_tx_recount(node_id);
 }
 
 int32_t incoming_tx_add(string node_name, PACKET_TX_ID_TYPE tx_id)
@@ -2790,7 +2907,7 @@ int32_t incoming_tx_add(string node_name, PACKET_TX_ID_TYPE tx_id)
     tx_progress tx_in;
 
     tx_in.tx_id = tx_id;
-    tx_in.sendmeta = false;
+    tx_in.sendmeta = true;
     tx_in.havemeta = false;
     tx_in.sentmeta = false;
     tx_in.senddata = false;
@@ -2811,52 +2928,62 @@ int32_t incoming_tx_add(string node_name, PACKET_TX_ID_TYPE tx_id)
 
 int32_t incoming_tx_update(packet_struct_metashort meta)
 {
-    uint8_t local_node = lookup_local_node_id(meta.node_id);
-    if (local_node == 0)
+    int32_t node_id = check_node_id(meta.node_id);
+    if (node_id <= 0)
     {
-        return TRANSFER_ERROR_NODE;
+        if (node_id < 0)
+        {
+            return node_id;
+        }
+        else
+        {
+            return TRANSFER_ERROR_NODE;
+        }
     }
 
     if (meta.tx_id)
     {
-        if (txq[(local_node)].incoming.progress[meta.tx_id].tx_id != meta.tx_id)
+        txq[node_id].incoming.rcvdmeta = true;
+        if (txq[(node_id)].incoming.progress[meta.tx_id].tx_id != meta.tx_id)
         {
-            txq[(local_node)].incoming.progress[meta.tx_id].tx_id = meta.tx_id;
-            txq[(local_node)].incoming.progress[meta.tx_id].havemeta = false;
+            txq[(node_id)].incoming.progress[meta.tx_id].tx_id = meta.tx_id;
+            txq[(node_id)].incoming.progress[meta.tx_id].havemeta = false;
         }
 
-        if (!txq[(local_node)].incoming.progress[meta.tx_id].havemeta)
+        txq[(node_id)].incoming.progress[meta.tx_id].sendmeta = false;
+        txq[(node_id)].incoming.progress[meta.tx_id].sentmeta = true;
+        txq[(node_id)].incoming.progress[meta.tx_id].senddata = false;
+        txq[(node_id)].incoming.progress[meta.tx_id].sentdata = false;
+        txq[(node_id)].incoming.progress[meta.tx_id].datatime = currentmjd();
+
+        if (!txq[(node_id)].incoming.progress[meta.tx_id].havemeta)
         {
             // Core META information
-            txq[(local_node)].incoming.progress[meta.tx_id].node_name = txq[(local_node)].node_name;
-            txq[(local_node)].incoming.progress[meta.tx_id].agent_name = meta.agent_name;
-            txq[(local_node)].incoming.progress[meta.tx_id].file_name = meta.file_name;
-            txq[(local_node)].incoming.progress[meta.tx_id].file_size = meta.file_size;
-            txq[(local_node)].incoming.progress[meta.tx_id].filepath = data_base_path(txq[(local_node)].incoming.progress[meta.tx_id].node_name, "incoming", txq[(local_node)].incoming.progress[meta.tx_id].agent_name, txq[(local_node)].incoming.progress[meta.tx_id].file_name);
-            string tx_name = "in_"+std::to_string(txq[(local_node)].incoming.progress[meta.tx_id].tx_id);
-            txq[(local_node)].incoming.progress[meta.tx_id].temppath = data_base_path(txq[(local_node)].incoming.progress[meta.tx_id].node_name, "temp", "file", tx_name);
+            txq[(node_id)].incoming.progress[meta.tx_id].node_name = txq[(node_id)].node_name;
+            txq[(node_id)].incoming.progress[meta.tx_id].agent_name = meta.agent_name;
+            txq[(node_id)].incoming.progress[meta.tx_id].file_name = meta.file_name;
+            txq[(node_id)].incoming.progress[meta.tx_id].file_size = meta.file_size;
+            txq[(node_id)].incoming.progress[meta.tx_id].filepath = data_base_path(txq[(node_id)].incoming.progress[meta.tx_id].node_name, "incoming", txq[(node_id)].incoming.progress[meta.tx_id].agent_name, txq[(node_id)].incoming.progress[meta.tx_id].file_name);
+            string tx_name = "in_"+std::to_string(txq[(node_id)].incoming.progress[meta.tx_id].tx_id);
+            txq[(node_id)].incoming.progress[meta.tx_id].temppath = data_base_path(txq[(node_id)].incoming.progress[meta.tx_id].node_name, "temp", "file", tx_name);
 
             // Derivative META information
-            //            txq[(local_node)].incoming.progress[meta.tx_id].state = STATE_REQDATA;
-            txq[(local_node)].incoming.progress[meta.tx_id].savetime = 0.;
-            txq[(local_node)].incoming.progress[meta.tx_id].havemeta = true;
-            txq[(local_node)].incoming.progress[meta.tx_id].sendmeta = false;
-            txq[(local_node)].incoming.progress[meta.tx_id].sentmeta = false;
-            txq[(local_node)].incoming.progress[meta.tx_id].senddata = false;
-            txq[(local_node)].incoming.progress[meta.tx_id].sentdata = false;
-            txq[(local_node)].incoming.progress[meta.tx_id].complete = false;
-            txq[(local_node)].incoming.progress[meta.tx_id].total_bytes = 0;
-            txq[(local_node)].incoming.progress[meta.tx_id].fp = nullptr;
-            txq[(local_node)].incoming.progress[meta.tx_id].file_info.clear();
+            //            txq[(node_id)].incoming.progress[meta.tx_id].state = STATE_REQDATA;
+            txq[(node_id)].incoming.progress[meta.tx_id].savetime = 0.;
+            txq[(node_id)].incoming.progress[meta.tx_id].havemeta = true;
+            txq[(node_id)].incoming.progress[meta.tx_id].complete = false;
+            txq[(node_id)].incoming.progress[meta.tx_id].total_bytes = 0;
+            txq[(node_id)].incoming.progress[meta.tx_id].fp = nullptr;
+            txq[(node_id)].incoming.progress[meta.tx_id].file_info.clear();
 
             // Save it to disk
-            write_meta(txq[(local_node)].incoming.progress[meta.tx_id]);
+            write_meta(txq[(node_id)].incoming.progress[meta.tx_id]);
         }
 
         if (agent->debug_level)
         {
             debug_fd_lock.lock();
-            fprintf(agent->get_debug_fd(), "%16.10f %.4f Incoming: Update incoming: %u %s %s %s\n", currentmjd(), dt.lap(), txq[(local_node)].incoming.progress[meta.tx_id].tx_id, txq[(local_node)].incoming.progress[meta.tx_id].node_name.c_str(), txq[(local_node)].incoming.progress[meta.tx_id].agent_name.c_str(), txq[(local_node)].incoming.progress[meta.tx_id].file_name.c_str());
+            fprintf(agent->get_debug_fd(), "%.4f %.4f Incoming: Update incoming: %u %s %s %s\n", tet.split(), dt.lap(), txq[(node_id)].incoming.progress[meta.tx_id].tx_id, txq[(node_id)].incoming.progress[meta.tx_id].node_name.c_str(), txq[(node_id)].incoming.progress[meta.tx_id].agent_name.c_str(), txq[(node_id)].incoming.progress[meta.tx_id].file_name.c_str());
             fflush(agent->get_debug_fd());
             debug_fd_lock.unlock();
         }
@@ -2869,10 +2996,10 @@ int32_t incoming_tx_update(packet_struct_metashort meta)
     }
 }
 
-int32_t incoming_tx_del(uint8_t local_node, uint16_t tx_id)
+int32_t incoming_tx_del(uint8_t node_id, uint16_t tx_id)
 {
-    local_node = check_local_node_id(local_node);
-    if (local_node == 0)
+    node_id = check_node_id(node_id);
+    if (node_id == 0)
     {
         return TRANSFER_ERROR_NODE;
     }
@@ -2881,31 +3008,52 @@ int32_t incoming_tx_del(uint8_t local_node, uint16_t tx_id)
     {
         for (uint16_t i=1; i<PROGRESS_QUEUE_SIZE; ++i)
         {
-            incoming_tx_del(local_node, i);
+            incoming_tx_del(node_id, i);
         }
     }
     else
     {
-        if (txq[(local_node)].incoming.progress[tx_id].tx_id == 0)
+        if (txq[(node_id)].incoming.progress[tx_id].tx_id == 0)
         {
             return TRANSFER_ERROR_MATCH;
         }
 
-        tx_progress tx_in = txq[(local_node)].incoming.progress[tx_id];
+        tx_progress tx_in = txq[(node_id)].incoming.progress[tx_id];
 
-        txq[(local_node)].incoming.progress[tx_id].tx_id = 0;
-        //        txq[(local_node)].incoming.progress[tx_id].state = STATE_NONE;
-        txq[(local_node)].incoming.progress[tx_id].havemeta = false;
-        if (txq[(local_node)].incoming.size)
+        txq[(node_id)].incoming.progress[tx_id].tx_id = 0;
+        txq[(node_id)].incoming.progress[tx_id].havemeta = false;
+        txq[(node_id)].incoming.progress[tx_id].havedata = false;
+        txq[(node_id)].incoming.progress[tx_id].complete = false;
+        if (txq[(node_id)].incoming.size)
         {
-            --txq[(local_node)].incoming.size;
+            --txq[(node_id)].incoming.size;
         }
 
-        // Close the DATA file
-        if (tx_in.fp != nullptr)
+        // Move file to its final location
+        if (tx_in.complete)
         {
-            fclose(tx_in.fp);
-            tx_in.fp = nullptr;
+            // Close the DATA file
+            if (tx_in.fp != nullptr)
+            {
+                fclose(tx_in.fp);
+                tx_in.fp = nullptr;
+            }
+            string final_filepath = tx_in.temppath + ".file";
+            int iret = rename(final_filepath.c_str(), tx_in.filepath.c_str());
+            // Make sure metadata is recorded
+            write_meta(tx_in, 0.);
+            if (agent->debug_level)
+            {
+                debug_fd_lock.lock();
+                fprintf(agent->get_debug_fd(), "%.4f %.4f Incoming: Renamed/Data: %d %s\n", tet.split(), dt.lap(), iret, tx_in.filepath.c_str());
+                fflush(agent->get_debug_fd());
+                debug_fd_lock.unlock();
+            }
+
+            // Mark complete
+            tx_in.complete = true;
+            tx_in.senddata = false;
+            tx_in.sentdata = true;
         }
 
         string filepath;
@@ -2920,19 +3068,19 @@ int32_t incoming_tx_del(uint8_t local_node, uint16_t tx_id)
         if (agent->debug_level)
         {
             debug_fd_lock.lock();
-            fprintf(agent->get_debug_fd(), "%16.10f %.4f Incoming: Del incoming: %u %s\n", currentmjd(), dt.lap(), tx_in.tx_id, tx_in.node_name.c_str());
+            fprintf(agent->get_debug_fd(), "%.4f %.4f Incoming: Del incoming: %u %s\n", tet.split(), dt.lap(), tx_in.tx_id, tx_in.node_name.c_str());
             fflush(agent->get_debug_fd());
             debug_fd_lock.unlock();
         }
     }
 
-    return incoming_tx_recount(local_node);
+    return incoming_tx_recount(node_id);
 
 }
 
-int32_t incoming_tx_purge(uint8_t local_node, uint16_t tx_id)
+int32_t incoming_tx_purge(uint8_t node_id, uint16_t tx_id)
 {
-    if (local_node == 0 || local_node >= txq.size())
+    if (node_id == 0 || node_id >= txq.size())
     {
         return TRANSFER_ERROR_INDEX;
     }
@@ -2941,66 +3089,69 @@ int32_t incoming_tx_purge(uint8_t local_node, uint16_t tx_id)
     {
         for (uint16_t i=1; i<PROGRESS_QUEUE_SIZE; ++i)
         {
-            txq[(local_node)].incoming.progress[i].fp = nullptr;
-            txq[(local_node)].incoming.progress[i].tx_id = 0;
-            //            txq[(local_node)].incoming.progress[i].state = STATE_NONE;
-            txq[(local_node)].incoming.progress[i].complete = false;
-            txq[(local_node)].incoming.progress[i].filepath = "";
-            txq[(local_node)].incoming.progress[i].havemeta = false;
-            txq[(local_node)].incoming.progress[i].savetime = 0;
-            txq[(local_node)].incoming.progress[i].temppath = "";
-            txq[(local_node)].incoming.progress[i].file_name = "";
-            txq[(local_node)].incoming.progress[i].file_size = 0;
-            txq[(local_node)].incoming.progress[i].node_name = "";
-            txq[(local_node)].incoming.progress[i].agent_name = "";
-            txq[(local_node)].incoming.progress[i].total_bytes = 0;
-            txq[(local_node)].incoming.progress[i].file_info.clear();
+            txq[(node_id)].incoming.progress[i].fp = nullptr;
+            txq[(node_id)].incoming.progress[i].tx_id = 0;
+            txq[(node_id)].incoming.progress[i].complete = false;
+            txq[(node_id)].incoming.progress[i].filepath = "";
+            txq[(node_id)].incoming.progress[i].havemeta = false;
+            txq[(node_id)].incoming.progress[i].savetime = 0;
+            txq[(node_id)].incoming.progress[i].temppath = "";
+            txq[(node_id)].incoming.progress[i].file_name = "";
+            txq[(node_id)].incoming.progress[i].file_size = 0;
+            txq[(node_id)].incoming.progress[i].node_name = "";
+            txq[(node_id)].incoming.progress[i].agent_name = "";
+            txq[(node_id)].incoming.progress[i].total_bytes = 0;
+            txq[(node_id)].incoming.progress[i].file_info.clear();
         }
     }
     else {
         {
-            txq[(local_node)].incoming.progress[tx_id].fp = nullptr;
-            txq[(local_node)].incoming.progress[tx_id].tx_id = 0;
-            //            txq[(local_node)].incoming.progress[tx_id].state = STATE_NONE;
-            txq[(local_node)].incoming.progress[tx_id].complete = false;
-            txq[(local_node)].incoming.progress[tx_id].filepath = "";
-            txq[(local_node)].incoming.progress[tx_id].havemeta = false;
-            txq[(local_node)].incoming.progress[tx_id].savetime = 0;
-            txq[(local_node)].incoming.progress[tx_id].temppath = "";
-            txq[(local_node)].incoming.progress[tx_id].file_name = "";
-            txq[(local_node)].incoming.progress[tx_id].file_size = 0;
-            txq[(local_node)].incoming.progress[tx_id].node_name = "";
-            txq[(local_node)].incoming.progress[tx_id].agent_name = "";
-            txq[(local_node)].incoming.progress[tx_id].total_bytes = 0;
-            txq[(local_node)].incoming.progress[tx_id].file_info.clear();
+            txq[(node_id)].incoming.progress[tx_id].fp = nullptr;
+            txq[(node_id)].incoming.progress[tx_id].tx_id = 0;
+            txq[(node_id)].incoming.progress[tx_id].complete = false;
+            txq[(node_id)].incoming.progress[tx_id].filepath = "";
+            txq[(node_id)].incoming.progress[tx_id].havemeta = false;
+            txq[(node_id)].incoming.progress[tx_id].savetime = 0;
+            txq[(node_id)].incoming.progress[tx_id].temppath = "";
+            txq[(node_id)].incoming.progress[tx_id].file_name = "";
+            txq[(node_id)].incoming.progress[tx_id].file_size = 0;
+            txq[(node_id)].incoming.progress[tx_id].node_name = "";
+            txq[(node_id)].incoming.progress[tx_id].agent_name = "";
+            txq[(node_id)].incoming.progress[tx_id].total_bytes = 0;
+            txq[(node_id)].incoming.progress[tx_id].file_info.clear();
         }
     }
-    txq[(local_node)].incoming.size = 0;
+    txq[(node_id)].incoming.size = 0;
 
     return 0;
 }
 
-int32_t incoming_tx_recount(uint8_t local_node)
+int32_t incoming_tx_recount(uint8_t node_id)
 {
-    if (local_node == 0 || local_node >= txq.size())
+    if (node_id == 0 || node_id >= txq.size())
     {
         return TRANSFER_ERROR_INDEX;
     }
 
-    txq[(local_node)].incoming.size = 0;
+    txq[(node_id)].incoming.size = 0;
     for (uint16_t i=1; i<PROGRESS_QUEUE_SIZE; ++i)
     {
-        if (txq[(local_node)].incoming.progress[i].tx_id)
+        if (txq[(node_id)].incoming.progress[i].tx_id)
         {
-            ++txq[(local_node)].incoming.size;
+            ++txq[(node_id)].incoming.size;
         }
     }
-    return txq[(local_node)].incoming.size;
+    return txq[(node_id)].incoming.size;
 }
 
-bool filestruc_compare_by_size(const filestruc& a, const filestruc& b)
+bool filestruc_smaller_by_size(const filestruc& a, const filestruc& b)
 {
     return a.size < b.size;
+}
+
+bool filestruc_larger_by_size(const filestruc& a, const filestruc& b)
+{
+    return a.size > b.size;
 }
 
 bool tx_progress_compare_by_size(const tx_progress& a, const tx_progress& b)
@@ -3008,29 +3159,29 @@ bool tx_progress_compare_by_size(const tx_progress& a, const tx_progress& b)
     return a.file_size < b.file_size;
 }
 
-PACKET_TX_ID_TYPE choose_incoming_tx_id(uint8_t local_node)
+PACKET_TX_ID_TYPE choose_incoming_tx_id(uint8_t node_id)
 {
     PACKET_TX_ID_TYPE tx_id = 0;
 
-    if (local_node > 0 && local_node < txq.size())
+    if (node_id > 0 && node_id < txq.size())
     {
         // Choose file with least data left to send
         PACKET_FILE_SIZE_TYPE nsize = INT32_MAX;
         for (PACKET_FILE_SIZE_TYPE i=1; i < PROGRESS_QUEUE_SIZE; ++i)
         {
             // calculate bytes so far
-            merge_chunks_overlap(txq[(local_node)].incoming.progress[i]);
+            merge_chunks_overlap(txq[(node_id)].incoming.progress[i]);
 
             // Remove anything suspicious: file_size == 0, file_size < total_bytes
-            if (txq[(local_node)].incoming.progress[i].havemeta && (txq[(local_node)].incoming.progress[i].file_size == 0 || txq[(local_node)].incoming.progress[i].file_size < txq[(local_node)].incoming.progress[i].total_bytes))
+            if (txq[(node_id)].incoming.progress[i].havemeta && (txq[(node_id)].incoming.progress[i].file_size == 0 || txq[(node_id)].incoming.progress[i].file_size < txq[(node_id)].incoming.progress[i].total_bytes))
             {
-                incoming_tx_del(local_node, txq[(local_node)].incoming.progress[i].tx_id);
+                incoming_tx_del(node_id, txq[(node_id)].incoming.progress[i].tx_id);
             }
             // Choose transactions for which we: have meta and bytes remaining is minimized
-            else if (txq[(local_node)].incoming.progress[i].tx_id && txq[(local_node)].incoming.progress[i].havemeta && (txq[(local_node)].incoming.progress[i].file_size - txq[(local_node)].incoming.progress[i].total_bytes) < nsize)
+            else if (txq[(node_id)].incoming.progress[i].tx_id && txq[(node_id)].incoming.progress[i].havemeta && (txq[(node_id)].incoming.progress[i].file_size - txq[(node_id)].incoming.progress[i].total_bytes) < nsize)
             {
-                nsize = txq[(local_node)].incoming.progress[i].file_size - txq[(local_node)].incoming.progress[i].total_bytes;
-                tx_id = txq[(local_node)].incoming.progress[i].tx_id;
+                nsize = txq[(node_id)].incoming.progress[i].file_size - txq[(node_id)].incoming.progress[i].total_bytes;
+                tx_id = txq[(node_id)].incoming.progress[i].tx_id;
             }
         }
     }
@@ -3038,31 +3189,39 @@ PACKET_TX_ID_TYPE choose_incoming_tx_id(uint8_t local_node)
     return tx_id;
 }
 
-PACKET_TX_ID_TYPE choose_outgoing_tx_id(uint8_t local_node)
+PACKET_TX_ID_TYPE choose_outgoing_tx_id(uint8_t node_id)
 {
     PACKET_TX_ID_TYPE tx_id = 0;
 
-    if (local_node > 0 && local_node < txq.size())
+    if (node_id > 0 && node_id < txq.size())
     {
         // Choose file with least data left to send
         PACKET_FILE_SIZE_TYPE nsize = INT32_MAX;
         for (PACKET_FILE_SIZE_TYPE i=1; i < PROGRESS_QUEUE_SIZE; ++i)
         {
-            if (txq[(local_node)].outgoing.progress[i].tx_id && txq[(local_node)].outgoing.progress[i].sentmeta && !txq[(local_node)].outgoing.progress[i].sentdata)
+            if (txq[(node_id)].outgoing.progress[i].tx_id && txq[(node_id)].outgoing.progress[i].enabled && txq[(node_id)].outgoing.progress[i].sentmeta && !txq[(node_id)].outgoing.progress[i].sentdata)
             {
-                // calculate bytes so far
-                merge_chunks_overlap(txq[(local_node)].outgoing.progress[i]);
-
-                // Remove anything suspicious: file_size == 0, file_size < total_bytes
-                if (txq[(local_node)].outgoing.progress[i].file_size == 0 || txq[(local_node)].outgoing.progress[i].file_size < txq[(local_node)].outgoing.progress[i].total_bytes)
+                // Remove anything file_size == 0
+                if (txq[(node_id)].outgoing.progress[i].file_size == 0)
                 {
-                    outgoing_tx_del(local_node, txq[(local_node)].outgoing.progress[i].tx_id);
+                    outgoing_tx_del(node_id, txq[(node_id)].outgoing.progress[i].tx_id);
                 }
-                // Choose unfinished transactions for which bytes remaining is minimized
-                else if (txq[(local_node)].outgoing.progress[i].total_bytes < nsize)
+                else
                 {
-                    nsize = txq[(local_node)].outgoing.progress[i].total_bytes;
-                    tx_id = txq[(local_node)].outgoing.progress[i].tx_id;
+                    // calculate bytes so far
+                    merge_chunks_overlap(txq[(node_id)].outgoing.progress[i]);
+
+                    // Remove anything suspicious: file_size < total_bytes
+                    if (txq[(node_id)].outgoing.progress[i].file_size < txq[(node_id)].outgoing.progress[i].total_bytes)
+                    {
+                        outgoing_tx_del(node_id, txq[(node_id)].outgoing.progress[i].tx_id, false);
+                    }
+                    // Choose unfinished transactions for which bytes remaining is minimized
+                    else if (txq[(node_id)].outgoing.progress[i].total_bytes < nsize)
+                    {
+                        nsize = txq[(node_id)].outgoing.progress[i].total_bytes;
+                        tx_id = txq[(node_id)].outgoing.progress[i].tx_id;
+                    }
                 }
             }
         }
@@ -3071,14 +3230,14 @@ PACKET_TX_ID_TYPE choose_outgoing_tx_id(uint8_t local_node)
     if (tx_id)
     {
 //        vector<file_progress> togo;
-//        togo = find_chunks_togo(txq[(local_node)].outgoing.progress[tx_id]);
+//        togo = find_chunks_togo(txq[(node_id)].outgoing.progress[tx_id]);
 //        for (file_progress missed : togo)
 //        {
-//            txq[(local_node)].outgoing.progress[tx_id].file_info.push_back(missed);
+//            txq[(node_id)].outgoing.progress[tx_id].file_info.push_back(missed);
 //        }
 
-        merge_chunks_overlap(txq[(local_node)].outgoing.progress[tx_id]);
-        txq[(local_node)].outgoing.progress[tx_id].senddata = true;
+        merge_chunks_overlap(txq[(node_id)].outgoing.progress[tx_id]);
+        txq[(node_id)].outgoing.progress[tx_id].senddata = true;
     }
     return tx_id;
 }
@@ -3097,9 +3256,9 @@ PACKET_TX_ID_TYPE check_tx_id(tx_entry &txentry, PACKET_TX_ID_TYPE tx_id)
 
 int32_t check_channel(PACKET_NODE_ID_TYPE node_id)
 {
-    for(uint16_t i=1; i<out_comm_channel.size(); ++i)
+    for(uint16_t i=0; i<out_comm_channel.size(); ++i)
     {
-        if (out_comm_channel[i].node == txq[node_id].node_name)
+        if (out_comm_channel[i].node.size() && txq[node_id].node_name == out_comm_channel[i].node)
         {
             return i;
         }
@@ -3109,152 +3268,26 @@ int32_t check_channel(PACKET_NODE_ID_TYPE node_id)
 
 int32_t add_node_name(string node_name)
 {
-    uint8_t local_node;
-    tx_queue tx;
+    uint8_t node_id;
 
-    if (txq.size() == 256)
+    node_id = lookup_node_id(node_name);
+    if (node_id == 0)
     {
-        return TRANSFER_ERROR_NODE;
+        return GENERAL_ERROR_OUTOFRANGE;
     }
 
-    if (txq.empty())
+    if (txq[node_id].node_name == node_name)
     {
-        tx.node_name = "";
-        tx.remote_id = 0;
-        tx.incoming.size = 0;
-        tx.outgoing.next_id = 1;
-        tx.outgoing.size = 0;
-        txq.push_back(tx);
-        incoming_tx_purge(local_node);
-        outgoing_tx_purge(local_node);
+        return node_id;
     }
 
-    for (uint16_t i=1; i<txq.size(); ++i)
-    {
-        if (txq[i].node_name == node_name)
-        {
-            return i;
-        }
-    }
-
-    local_node = txq.size();
-    tx.node_name = node_name;
-    tx.remote_id = 0;
-    tx.incoming.size = 0;
-    tx.outgoing.next_id = 1;
-    tx.outgoing.size = 0;
-    txq.push_back(tx);
-    incoming_tx_purge(local_node);
-    outgoing_tx_purge(local_node);
-    return local_node;
-}
-
-uint8_t check_local_node_id(PACKET_NODE_ID_TYPE local_id)
-{
-    uint8_t id = 0;
-    if (local_id > 0 && local_id < txq.size())
-    {
-        id = local_id;
-    }
-    return id;
-}
-
-uint8_t lookup_local_node_id(PACKET_NODE_ID_TYPE remote_id)
-{
-    uint8_t id = 0;
-    for (uint8_t i=1; i<txq.size(); ++i)
-    {
-        if (txq[i].remote_id == remote_id)
-        {
-            id = i;
-            break;
-        }
-    }
-    return id;
-}
-
-uint8_t lookup_local_node_id(string node_name)
-{
-    uint8_t local_id = 0;
-    for (uint8_t i=1; i<txq.size(); ++i)
-    {
-        if (txq[i].node_name == node_name)
-        {
-            local_id = i;
-            break;
-        }
-    }
-    return local_id;
-}
-
-uint8_t check_remote_node_id(PACKET_NODE_ID_TYPE remote_id)
-{
-    uint8_t id = 0;
-    for (uint8_t i=1; i<txq.size(); ++i)
-    {
-        if (txq[i].remote_id == remote_id)
-        {
-            id = remote_id;
-            break;
-        }
-    }
-    return id;
-}
-
-uint8_t lookup_remote_node_id(PACKET_NODE_ID_TYPE local_id)
-{
-    int32_t remote_id = 0;
-    if (local_id > 0 && local_id < txq.size())
-    {
-        if (txq[local_id].remote_id > 0)
-        {
-            remote_id = txq[local_id].remote_id;
-        }
-    }
-    return remote_id;
-}
-
-uint8_t lookup_remote_node_id(string node_name)
-{
-    uint8_t remote_id = 0;
-    for (uint8_t i=1; i<txq.size(); ++i)
-    {
-        if (txq[i].node_name == node_name)
-        {
-            remote_id = txq[i].remote_id;
-            break;
-        }
-    }
-    return remote_id;
-}
-
-uint8_t set_remote_node_id(PACKET_NODE_ID_TYPE node_id, string node_name)
-{
-    int32_t id = 0;
-    for (uint16_t i=1; i<txq.size(); ++i)
-    {
-        if (txq[i].node_name == node_name)
-        {
-            txq[i].remote_id = node_id;
-            id = i;
-            break;
-        }
-    }
-    return id;
-}
-
-string get_remote_node_name(PACKET_NODE_ID_TYPE node_id)
-{
-    string name;
-    for (uint16_t i=1; i<txq.size(); ++i)
-    {
-        if (txq[i].remote_id == node_id)
-        {
-            name = txq[i].node_name;
-            break;
-        }
-    }
-    return name;
+    txq[node_id].node_name = node_name;
+    txq[node_id].incoming.size = 0;
+    txq[node_id].outgoing.next_id = 1;
+    txq[node_id].outgoing.size = 0;
+    incoming_tx_purge(node_id);
+    outgoing_tx_purge(node_id);
+    return node_id;
 }
 
 int32_t next_incoming_tx(PACKET_NODE_ID_TYPE node, int32_t use_channel)
@@ -3264,7 +3297,7 @@ int32_t next_incoming_tx(PACKET_NODE_ID_TYPE node, int32_t use_channel)
     if (tx_id < PROGRESS_QUEUE_SIZE && tx_id > 0)
     {
         // See if we know what the remote node_id is for this
-        if (txq[node].remote_id > 0)
+        if (txq[node].node_id > 0)
         {
             // Check if file has been completely received
             if(txq[(node)].incoming.progress[tx_id].file_size == txq[(node)].incoming.progress[tx_id].total_bytes && txq[(node)].incoming.progress[tx_id].havemeta)
@@ -3273,7 +3306,7 @@ int32_t next_incoming_tx(PACKET_NODE_ID_TYPE node, int32_t use_channel)
                 if (agent->debug_level)
                 {
                     debug_fd_lock.lock();
-                    fprintf(agent->get_debug_fd(), "%16.10f %.4f Incoming(next_incoming_tx): Complete: %u %s %u %u\n", currentmjd(), dt.lap(), txq[(node)].incoming.progress[tx_id].tx_id, txq[(node)].incoming.progress[tx_id].node_name.c_str(), txq[(node)].incoming.progress[tx_id].file_size, txq[(node)].incoming.progress[tx_id].total_bytes);
+                    fprintf(agent->get_debug_fd(), "%.4f %.4f Incoming(next_incoming_tx): Complete: %u %s %u %u\n", tet.split(), dt.lap(), txq[(node)].incoming.progress[tx_id].tx_id, txq[(node)].incoming.progress[tx_id].node_name.c_str(), txq[(node)].incoming.progress[tx_id].file_size, txq[(node)].incoming.progress[tx_id].total_bytes);
                     fflush(agent->get_debug_fd());
                     debug_fd_lock.unlock();
                 }
@@ -3293,7 +3326,7 @@ int32_t next_incoming_tx(PACKET_NODE_ID_TYPE node, int32_t use_channel)
                     if (agent->debug_level)
                     {
                         debug_fd_lock.lock();
-                        fprintf(agent->get_debug_fd(), "%16.10f %.4f Incoming(next_incoming_tx): Renamed: %d %s\n", currentmjd(), dt.lap(), iret, txq[(node)].incoming.progress[tx_id].filepath.c_str());
+                        fprintf(agent->get_debug_fd(), "%.4f %.4f Incoming(next_incoming_tx): Renamed: %d %s\n", tet.split(), dt.lap(), iret, txq[(node)].incoming.progress[tx_id].filepath.c_str());
                         fflush(agent->get_debug_fd());
                         debug_fd_lock.unlock();
                     }
@@ -3305,15 +3338,108 @@ int32_t next_incoming_tx(PACKET_NODE_ID_TYPE node, int32_t use_channel)
                 if (agent->debug_level)
                 {
                     debug_fd_lock.lock();
-                    fprintf(agent->get_debug_fd(), "%16.10f %.4f Incoming(next_incoming_tx): More: %u %s %u %u\n", currentmjd(), dt.lap(), txq[(node)].incoming.progress[tx_id].tx_id, txq[(node)].incoming.progress[tx_id].node_name.c_str(), txq[(node)].incoming.progress[tx_id].file_size, txq[(node)].incoming.progress[tx_id].total_bytes);
+                    fprintf(agent->get_debug_fd(), "%.4f %.4f Incoming(next_incoming_tx): More: %u %s %u %u\n", tet.split(), dt.lap(), txq[(node)].incoming.progress[tx_id].tx_id, txq[(node)].incoming.progress[tx_id].node_name.c_str(), txq[(node)].incoming.progress[tx_id].file_size, txq[(node)].incoming.progress[tx_id].total_bytes);
                     fflush(agent->get_debug_fd());
                     debug_fd_lock.unlock();
                 }
-                out_comm_channel[use_channel].send_reqdata = true;
             }
         }
     }
     return tx_id;
+}
+
+// Send Command
+int32_t request_send_command(string &request, string &response, Agent *)
+{
+    size_t f1 = request.find(' ');
+    size_t f2 = request.find(' ', f1 + 1);
+    string nodename = request.substr(f1+1, (f2-f1)-1);
+    string tcommand = request.substr(f2+1);
+    for (uint16_t i=0; i<tcommand.length(); ++i)
+    {
+        if (tcommand[i] == 0)
+        {
+            tcommand.resize(i);
+            break;
+        }
+    }
+    string command;
+    if (tcommand[0] == '{')
+    {
+        command = tcommand;
+    }
+    else
+    {
+        JSONObject jobject("event_name", data_name(nodename, currentmjd(), "file_command", ""));
+        jobject.addElement("event_utc", 0.);
+        jobject.addElement("event_type", EVENT_TYPE_COMMAND);
+        jobject.addElement("event_flag", 0);
+        jobject.addElement("event_data", tcommand);
+        command = jobject.to_json_string();
+    }
+
+    int32_t node_id = lookup_node_id(nodename);
+    if (node_id > 0)
+    {
+        int32_t use_channel;
+        if ((use_channel=check_channel(node_id)) > 0)
+        {
+            vector<PACKET_BYTE> packet;
+            make_command_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(node_id), command);
+            queuesendto(static_cast <PACKET_NODE_ID_TYPE>(node_id), "Outgoing", packet);
+            response = command;
+        }
+        else
+        {
+            return use_channel;
+        }
+    }
+    else
+    {
+        return node_id;
+    }
+
+
+    return 0;
+}
+
+// Send Message
+int32_t request_send_message(string &request, string &response, Agent *)
+{
+    size_t f1 = request.find(' ');
+    size_t f2 = request.find(' ', f1 + 1);
+    string nodename = request.substr(f1+1, (f2-f1)-1);
+    string message = request.substr(f2+1);
+    for (uint16_t i=0; i<message.length(); ++i)
+    {
+        if (message[i] == 0)
+        {
+            message.resize(i);
+            break;
+        }
+    }
+    int32_t node_id = lookup_node_id(nodename);
+    if (node_id > 0)
+    {
+        int32_t use_channel;
+        if ((use_channel=check_channel(node_id)) > 0)
+        {
+            vector<PACKET_BYTE> packet;
+            make_message_packet(packet, static_cast <PACKET_NODE_ID_TYPE>(node_id), message);
+            queuesendto(static_cast <PACKET_NODE_ID_TYPE>(node_id), "Outgoing", packet);
+        }
+        else
+        {
+            return use_channel;
+        }
+    }
+    else
+    {
+        return node_id;
+    }
+
+
+    return 0;
 }
 
 int32_t request_debug(string &request, string &, Agent *)
@@ -3339,7 +3465,7 @@ int32_t request_set_logstride(string &request, string &, Agent *)
     return 0;
 }
 
-int32_t request_get_logstride(string & , string & response, Agent *)
+int32_t request_get_logstride(string & , string &response, Agent *)
 {
     response =  "{" + to_json("logstride", logstride_sec) + "}";
     return 0;
@@ -3357,7 +3483,7 @@ void write_queue_log(double logdate)
 
 int32_t request_list_incoming_json(string &request, string &response, Agent *agent)
 {
-    (response = json_list_incoming().c_str());
+    (response = json_list_incoming());
     return 0;
 }
 
@@ -3406,7 +3532,7 @@ string json_list_outgoing() {
     JSONObject jobj;
     JSONArray outgoing;
 
-    outgoing.resize(txq.size());
+//    outgoing.resize(txq.size());
     for (uint16_t node=0; node<txq.size(); ++node)
     {
 
@@ -3414,8 +3540,8 @@ string json_list_outgoing() {
         node_obj.addElement("count", txq[node].outgoing.size);
 
         JSONArray files;
-        files.resize(txq[node].outgoing.size);
-        int i =0;
+//        files.resize(txq[node].outgoing.size);
+//        int i =0;
         for(tx_progress tx : txq[node].outgoing.progress)
         {
             if (tx.tx_id)
@@ -3425,18 +3551,19 @@ string json_list_outgoing() {
                 f.addElement("name", tx.file_name);
                 f.addElement("bytes", tx.total_bytes);
                 f.addElement("size", tx.file_size);
-                files.at(i) = (JSONValue(f));
-                i++;
+                files.push_back(JSONValue(f));
+//                files.at(i) = (JSONValue(f));
+//                i++;
             }
         }
         node_obj.addElement("files", files);
-        outgoing.at(node) = JSONValue(node_obj);
+//        outgoing.at(node) = JSONValue(node_obj);
+        outgoing.push_back(node_obj);
 
     }
     jobj.addElement("outgoing", outgoing);
     return jobj.to_json_string();
 }
-
 string json_list_queue()
 {
     JSONObject jobj;
@@ -3496,4 +3623,28 @@ string json_list_queue()
     jobj.addElement("outgoing", outgoing);
     jobj.addElement("incoming", incoming);
     return jobj.to_json_string();
+}
+
+void profile_check(int32_t line_number, uint16_t thread)
+{
+    return;
+    static FILE *fp = nullptr;
+//    static mutex profile_lock;
+
+    debug_fd_lock.lock();
+
+    if (fp == nullptr)
+    {
+//        fp = fopen("profile_check.out", "a");
+        fp = agent->get_debug_fd();
+    }
+
+    if (fp != nullptr)
+    {
+        fprintf(fp, "%.3f %u %d\n", tet.split(), thread, line_number);
+        fflush(fp);
+    }
+
+    debug_fd_lock.unlock();
+
 }
