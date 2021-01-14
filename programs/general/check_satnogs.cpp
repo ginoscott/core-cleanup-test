@@ -27,51 +27,43 @@
 * condititons and terms to use this software.
 ********************************************************************/
 
-//TODO: add description
-
-#include "math/mathlib.h"
+#include "support/configCosmos.h"
+#include "support/jsonclass.h"
+#include "support/datalib.h"
 
 int main(int argc, char *argv[])
 {
-	rvector sourcea = {1., 0., 0.};
-	rvector sourceb = {0., 1., 0.};
-	rvector targeta;
-	rvector targetb;
+    string filename = argv[1];
 
-	switch (argc)
-	{
-	case 13:
-		// sourcea, sourceb, targeta, targetb
-		{
-			for (uint16_t i=0; i<3; ++i)
-			{
-				sourcea.col[i] = atof(argv[i+1]);
-				sourceb.col[i] = atof(argv[i+4]);
-				targeta.col[i] = atof(argv[i+7]);
-				targetb.col[i] = atof(argv[i+10]);
-			}
-		}
-		break;
-	case 7:
-		// targetx, targety
-		{
-			for (uint16_t i=0; i<3; ++i)
-			{
-				targeta.col[i] = atof(argv[i+1]);
-				targetb.col[i] = atof(argv[i+4]);
-			}
-		}
-		break;
-	default:
-		{
-			printf("Usage: calc_transform sourcea_x sourcea_y sourcea_z sourceb_x sourceb_y sourceb_z targeta_x targeta_y targeta_z targetb_x targetb_y targetb_z\n");
-			printf("Usage: calc_transform targetx_x targetx_y targetx_z targety_x targety_y targety_z\n");
-			exit(1);
-		}
-		break;
-	}
+    string input;
 
-    quaternion tq = q_irotate_for(sourcea, sourceb, targeta, targetb);
+    FILE *fp = fopen(filename.c_str(), "r");
+    int ic;
+    while ((ic=fgetc(fp)) != EOF)
+    {
+        input.push_back(ic);
+    };
 
-	printf("%f [ %f, %f, %f ]\n", tq.w, tq.d.x, tq.d.y, tq.d.z);
+    Json jobject(input);
+
+    for (Json::Member member : jobject.Members)
+    {
+        for (uint16_t i=0; i<member.object.members.size(); ++i)
+        {
+            if (member.object.members[i].value.name == "id")
+            {
+                printf("%s\t", jobject.Members[i].value.name.c_str());
+            }
+            else if (member.object.members[i].value.name == "start")
+            {
+
+            }
+            else if (member.object.members[i].value.name == "end")
+            {
+
+            }
+        }
+        printf("\n");
+    }
+
 }
