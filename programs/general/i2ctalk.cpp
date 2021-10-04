@@ -2,6 +2,7 @@
 #include "support/cosmos-errno.h"
 #include "support/elapsedtime.h"
 #include "support/stringlib.h"
+#include "support/datalib.h"
 #include "device/i2c/i2c.h"
 #include <iostream>
 #include <string>
@@ -17,6 +18,7 @@ static string device = "/dev/i2c-2"; // default device
 static float delay = .05;
 static I2C *i2cport;
 static uint16_t rcount = 0;
+static uint8_t probe = 1;
 
 int main(int argc, char *argv[])
 {
@@ -36,9 +38,24 @@ int main(int argc, char *argv[])
     // input format
     // <device> <address> <rx_nbytes> <tx_byte0> <tx_byte1>
 
+    if (data_ischardev("/dev/i2c-0"))
+    {
+        device = "/dev/i2c-0";
+    }
+    else if (data_ischardev("/dev/i2c-1"))
+    {
+        device = "/dev/i2c-1";
+    }
+    else if (data_ischardev("/dev/i2c-2"))
+    {
+        device = "/dev/i2c-2";
+    }
+
     string outstring = "";
     switch (argc)
     {
+    case 7:
+        probe = atoi(argv[6]);
     case 6:
         device = argv[5];
     case 5:
@@ -48,11 +65,20 @@ int main(int argc, char *argv[])
     case 3:
         outstring = argv[2];
     case 2:
-        //        address = strtol(argv[1], nullptr, 16);
-        address = strtol(argv[1], nullptr, 10);
-        break;
+        {
+            string addr = string(argv[1]);
+            if (addr.find_first_of("xX") != string::npos)
+            {
+                address = strtol(addr.substr(addr.find_first_of("xX")+1).c_str(), nullptr, 16);
+            }
+            else
+            {
+                address = strtol(argv[1], nullptr, 10);
+            }
+            break;
+        }
     default:
-        printf("Usage: i2ctalk addressx dd[:dd:dd:dd] rcount [ delaysec [ device ]]\n");
+        printf("Usage: i2ctalk addressx dd[:dd:dd:dd] rcount [ delaysec [ device [0|1(probe)]]]\n");
         exit(0);
     }
 
@@ -62,15 +88,28 @@ int main(int argc, char *argv[])
         exit(0);
     }
 
+    if (!data_ischardev(device))
+    {
+        printf("No Device %s\n", device.c_str());
+        exit(0);
+    }
+
     vector <string> outs = string_split(outstring,":");
     dataout.clear();
     for (string tout : outs)
     {
-        dataout.push_back(strtol(tout.c_str(), nullptr, 10));
+        if (string(tout).find_first_of("xX") != string::npos)
+        {
+            dataout.push_back(strtol(tout.substr(tout.find_first_of("xX")+1).c_str(), nullptr, 16));
+        }
+        else
+        {
+            dataout.push_back(strtol(tout.c_str(), nullptr, 10));
+        }
     }
 
     ElapsedTime i2ct;
-    i2cport = new I2C(device, address, delay);
+    i2cport = new I2C(device, address, delay, (probe?true:false));
     if (i2cport->get_error() < 0)
     {
         printf("%s\n", cosmos_error_string(i2cport->get_error()).c_str());
